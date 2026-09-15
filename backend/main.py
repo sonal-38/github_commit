@@ -31,6 +31,7 @@ def read_root():
             "pr_comments": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/comments",
             "issues": "/github/repositories/{owner}/{repo}/issues",
             "issue_comments": "/github/repositories/{owner}/{repo}/issues/{issue_number}/comments",
-            "pr_files": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/files"
+            "pr_files": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/files",
+            "ingest": "/github/repositories/{owner}/{repo}/ingest"
         }
     }

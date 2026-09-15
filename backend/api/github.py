@@ -12,6 +12,8 @@ from schemas.issue import (
     IssueCommentListResponse,
 )
 from schemas.pull_request_file import PullRequestFileListResponse
+from ingestion.normalizer import IngestionSummaryResponse
+from ingestion.service import IngestionService
 
 router = APIRouter(
     prefix="/github",
@@ -276,6 +278,38 @@ def get_pull_request_files(owner: str, repo: str, pull_number: int):
             status_code=500,
             detail="An unexpected error occurred while communicating with GitHub"
         )
+
+
+@router.post("/repositories/{owner}/{repo}/ingest", response_model=IngestionSummaryResponse)
+def ingest_repository(owner: str, repo: str):
+    """
+    Ingest and normalize all engineering data for a specified repository.
+    Fetches repositories, commits, PRs, reviews, comments, issues, issue comments,
+    and changed files, transforming them into a consistent internal normalized representation.
+    Note: Data is normalized and counted in-memory; no database storage is performed.
+
+    Args:
+        owner: GitHub username or organization (e.g., 'sonal-38')
+        repo: Repository name (e.g., 'smart-payment-platform')
+
+    Returns:
+        IngestionSummaryResponse containing repository name, status, and entity counts.
+    """
+    service = IngestionService()
+    try:
+        summary = service.ingest_repository(owner=owner, repo=repo)
+        return summary
+    except GitHubClientError as err:
+        raise HTTPException(
+            status_code=err.status_code,
+            detail=err.message
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred during ingestion and normalization"
+        )
+
 
 
 

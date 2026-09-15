@@ -98,6 +98,40 @@ class GitHubClient:
 
         return parsed_repositories
 
+    def get_repository(self, owner: str, repo: str) -> Dict[str, Any]:
+        """
+        Fetch repository details for a specific repository.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}"
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+        except requests.exceptions.RequestException as e:
+            raise GitHubClientError(f"Failed to connect to GitHub API: {str(e)}", status_code=503)
+
+        if response.status_code == 404:
+            raise GitHubClientError("GitHub repository not found", status_code=404)
+        elif response.status_code == 401:
+            raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+        elif response.status_code == 403:
+            raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+        elif response.status_code != 200:
+            raise GitHubClientError(f"GitHub API returned error status {response.status_code}", status_code=response.status_code)
+
+        try:
+            repo_data = response.json()
+        except ValueError:
+            raise GitHubClientError("Received invalid JSON response from GitHub API", status_code=502)
+
+        owner_data = repo_data.get("owner") or {}
+        return {
+            "repository_id": repo_data.get("id"),
+            "name": repo_data.get("name"),
+            "full_name": repo_data.get("full_name"),
+            "owner_login": owner_data.get("login"),
+            "html_url": repo_data.get("html_url"),
+        }
+
     def get_repository_commits(self, owner: str, repo: str) -> List[Dict[str, Any]]:
         """
         Fetch all commits for a given repository with pagination.
