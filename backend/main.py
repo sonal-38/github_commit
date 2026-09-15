@@ -24,6 +24,7 @@ def read_root():
         "status": "online",
         "endpoints": {
             "docs": "/docs",
-            "repositories": "/github/repositories"
+            "repositories": "/github/repositories",
+            "commits": "/github/repositories/{owner}/{repo}/commits"
         }
     }
