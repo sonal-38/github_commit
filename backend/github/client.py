@@ -21,6 +21,33 @@ class GitHubClient:
         # Read the token from environment variables
         self.token = os.getenv("GITHUB_TOKEN")
 
+    @staticmethod
+    def _clean_owner_repo(owner: str, repo: str) -> tuple[str, str]:
+        """
+        Normalize and sanitize owner and repo strings.
+        Handles cases where users input 'owner/repo' in either parameter,
+        or include leading/trailing whitespace and slashes.
+        """
+        owner_clean = (owner or "").strip(" \t\n\r/")
+        repo_clean = (repo or "").strip(" \t\n\r/")
+
+        if "/" in repo_clean:
+            parts = [p.strip() for p in repo_clean.split("/") if p.strip()]
+            if len(parts) >= 2:
+                owner_clean = parts[0]
+                repo_clean = parts[1]
+            elif len(parts) == 1:
+                repo_clean = parts[0]
+        elif "/" in owner_clean:
+            parts = [p.strip() for p in owner_clean.split("/") if p.strip()]
+            if len(parts) >= 2:
+                owner_clean = parts[0]
+                repo_clean = parts[1]
+            elif len(parts) == 1:
+                owner_clean = parts[0]
+
+        return owner_clean, repo_clean
+
     def _get_headers(self) -> Dict[str, str]:
         """Validate and return authentication headers for GitHub API."""
         if not self.token or self.token.strip() == "" or self.token.strip() == "your_token_here":
@@ -40,6 +67,7 @@ class GitHubClient:
         Returns a simplified list of repositories with:
         - name: repository name
         - owner: login of repository owner
+        - full_name: owner/name format
         - private: boolean indicating if repository is private
         - url: html URL to view repository in browser
         """
@@ -92,6 +120,7 @@ class GitHubClient:
             parsed_repositories.append({
                 "name": repo.get("name"),
                 "owner": owner_data.get("login"),
+                "full_name": repo.get("full_name") or f"{owner_data.get('login')}/{repo.get('name')}",
                 "private": repo.get("private", False),
                 "url": repo.get("html_url"),
             })
@@ -102,6 +131,7 @@ class GitHubClient:
         """
         Fetch repository details for a specific repository.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}"
         try:
@@ -110,7 +140,10 @@ class GitHubClient:
             raise GitHubClientError(f"Failed to connect to GitHub API: {str(e)}", status_code=503)
 
         if response.status_code == 404:
-            raise GitHubClientError("GitHub repository not found", status_code=404)
+            raise GitHubClientError(
+                f"GitHub repository '{owner}/{repo}' not found. Please verify the owner ('{owner}') and repository name ('{repo}'). If the repository is private, ensure your GITHUB_TOKEN has the 'repo' scope.",
+                status_code=404,
+            )
         elif response.status_code == 401:
             raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
         elif response.status_code == 403:
@@ -136,7 +169,9 @@ class GitHubClient:
         """
         Fetch all commits for a given repository with pagination.
         Processes pages of 100 commits until no more are returned.
+        Handles empty repositories gracefully.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/commits"
         all_commits: List[Dict[str, Any]] = []
@@ -162,9 +197,24 @@ class GitHubClient:
                     status_code=503,
                 )
 
+            # 409 Conflict indicates an empty repository (0 commits pushed)
+            if response.status_code == 409:
+                return []
+
             # Handle specific HTTP status codes
             if response.status_code == 404:
-                raise GitHubClientError("GitHub repository not found", status_code=404)
+                # Check if GitHub reported that the repository is empty
+                try:
+                    err_json = response.json()
+                    msg = err_json.get("message", "")
+                    if "empty" in msg.lower():
+                        return []
+                except Exception:
+                    pass
+                raise GitHubClientError(
+                    f"GitHub repository '{owner}/{repo}' not found. Please verify the owner ('{owner}') and repository name ('{repo}'). If the repository is private, ensure your GITHUB_TOKEN has the 'repo' scope.",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
@@ -222,6 +272,7 @@ class GitHubClient:
         Fetch all pull requests (open, closed, merged) for a repository with pagination.
         Processes pages of 100 pull requests until no more are returned.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls"
         all_prs: List[Dict[str, Any]] = []
@@ -250,7 +301,10 @@ class GitHubClient:
 
             # Handle specific HTTP status codes
             if response.status_code == 404:
-                raise GitHubClientError("GitHub repository not found", status_code=404)
+                raise GitHubClientError(
+                    f"GitHub repository '{owner}/{repo}' not found. Please verify the owner ('{owner}') and repository name ('{repo}').",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
@@ -302,6 +356,7 @@ class GitHubClient:
         """
         Fetch all reviews for a specific pull request with pagination.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
         all_reviews: List[Dict[str, Any]] = []
@@ -328,7 +383,10 @@ class GitHubClient:
                 )
 
             if response.status_code == 404:
-                raise GitHubClientError("Pull request or repository not found", status_code=404)
+                raise GitHubClientError(
+                    f"Pull request #{pull_number} or repository '{owner}/{repo}' not found",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
@@ -373,6 +431,7 @@ class GitHubClient:
         """
         Fetch all review comments (inline/diff comments) for a specific pull request with pagination.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/comments"
         all_comments: List[Dict[str, Any]] = []
@@ -399,7 +458,10 @@ class GitHubClient:
                 )
 
             if response.status_code == 404:
-                raise GitHubClientError("Pull request or repository not found", status_code=404)
+                raise GitHubClientError(
+                    f"Pull request #{pull_number} or repository '{owner}/{repo}' not found",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
@@ -448,6 +510,7 @@ class GitHubClient:
         Fetch all issues for a repository (excluding pull requests) with pagination.
         Processes pages of 100 issues until no more are returned.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues"
         all_issues: List[Dict[str, Any]] = []
@@ -475,7 +538,10 @@ class GitHubClient:
                 )
 
             if response.status_code == 404:
-                raise GitHubClientError("GitHub repository not found", status_code=404)
+                raise GitHubClientError(
+                    f"GitHub repository '{owner}/{repo}' not found. Please verify the owner ('{owner}') and repository name ('{repo}').",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
@@ -542,6 +608,7 @@ class GitHubClient:
         """
         Fetch all comments for a specific issue with pagination.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
         all_comments: List[Dict[str, Any]] = []
@@ -568,7 +635,10 @@ class GitHubClient:
                 )
 
             if response.status_code == 404:
-                raise GitHubClientError("Issue or repository not found", status_code=404)
+                raise GitHubClientError(
+                    f"Issue #{issue_number} or repository '{owner}/{repo}' not found",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
@@ -613,6 +683,7 @@ class GitHubClient:
         Fetch all changed files for a specific pull request with pagination.
         Processes pages of 100 files until no more are returned.
         """
+        owner, repo = self._clean_owner_repo(owner, repo)
         headers = self._get_headers()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/files"
         all_files: List[Dict[str, Any]] = []
@@ -639,7 +710,10 @@ class GitHubClient:
                 )
 
             if response.status_code == 404:
-                raise GitHubClientError("Pull request or repository not found", status_code=404)
+                raise GitHubClientError(
+                    f"Pull request #{pull_number} or repository '{owner}/{repo}' not found",
+                    status_code=404,
+                )
             elif response.status_code == 401:
                 raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
             elif response.status_code == 403:
