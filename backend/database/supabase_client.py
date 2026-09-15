@@ -35,8 +35,13 @@ class SupabaseClient:
     """
 
     def __init__(self, url: Optional[str] = None, key: Optional[str] = None):
-        self.url = (url or os.getenv("SUPABASE_URL", "")).rstrip("/")
-        self.key = key or os.getenv("SUPABASE_KEY", "")
+        raw_url = (url or os.getenv("SUPABASE_URL", "")).strip().rstrip("/")
+        # If user included /rest/v1 in their SUPABASE_URL, strip it so it doesn't double
+        if raw_url.endswith("/rest/v1"):
+            raw_url = raw_url[:-len("/rest/v1")].rstrip("/")
+
+        self.url = raw_url
+        self.key = (key or os.getenv("SUPABASE_KEY", "")).strip()
 
         if not self.url or not self.key:
             raise SupabaseConfigurationError(
@@ -118,19 +123,34 @@ class SupabaseClient:
         """Standardized error handler hiding credentials from exceptions."""
         try:
             err_data = response.json()
+            code = err_data.get("code", "")
+            hint = err_data.get("hint")
             msg = err_data.get("message") or err_data.get("details") or response.text
         except Exception:
+            code = ""
+            hint = None
             msg = response.text
 
         status = response.status_code
-        if status == 401 or status == 403:
+        if status in (401, 403):
             raise SupabaseDatabaseError(
-                "Supabase authentication failed. Please verify SUPABASE_KEY in backend/.env",
-                status_code=status
+                "Supabase authentication failed. Please verify SUPABASE_KEY in backend/.env (use your project's service_role secret key or check RLS permissions).",
+                status_code=status,
+                details=msg
+            )
+        elif "schema cache" in msg.lower() or code == "PGRST205":
+            raise SupabaseDatabaseError(
+                f"Table '{table}' exists in your PostgreSQL database, but Supabase's API cache has not reloaded yet. "
+                "To fix this immediately: In Supabase SQL Editor, run: NOTIFY pgrst, 'reload schema'; "
+                "(or in Supabase Dashboard go to Settings -> API and click 'Reload schema cache').",
+                status_code=404,
+                details=msg
             )
         elif status == 404 or "does not exist" in msg.lower() or "relation" in msg.lower():
+            hint_str = f" (Hint: {hint})" if hint else ""
             raise SupabaseDatabaseError(
-                f"Table '{table}' not found in Supabase. Please run database/schema.sql in the Supabase SQL Editor.",
+                f"Table '{table}' was not found in Supabase public schema{hint_str}. "
+                "Please run database/schema.sql in the Supabase SQL Editor and ensure 'NOTIFY pgrst, ''reload schema'';' is executed.",
                 status_code=404,
                 details=msg
             )

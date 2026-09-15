@@ -306,9 +306,12 @@ def ingest_repository(owner: str, repo: str):
             detail=str(cfg_err)
         )
     except SupabaseDatabaseError as db_err:
+        detail_msg = db_err.message
+        if db_err.details and db_err.details != db_err.message:
+            detail_msg = f"{db_err.message} [Supabase error: {db_err.details}]"
         raise HTTPException(
             status_code=db_err.status_code,
-            detail=db_err.message
+            detail=detail_msg
         )
     except GitHubClientError as err:
         raise HTTPException(
