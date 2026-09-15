@@ -59,13 +59,18 @@ class SupabaseClient:
     def select(self, table: str, query_params: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
         Execute a SELECT query against a Supabase table.
+        Preserves PostgREST query parameters (eq, in, etc.) without malformed encoding.
         """
         endpoint = f"{self.rest_url}/{table}"
+        if query_params:
+            # Build query string preserving literal PostgREST syntax like in.(1,2) and eq.val
+            parts = [f"{k}={v}" for k, v in query_params.items()]
+            endpoint = f"{endpoint}?{'&'.join(parts)}"
+
         try:
             response = requests.get(
                 endpoint,
                 headers=self.headers,
-                params=query_params or {},
                 timeout=15
             )
         except requests.exceptions.RequestException as e:

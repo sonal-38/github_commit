@@ -93,10 +93,13 @@ class KnowledgeGraphBuilder:
         changed_files = []
 
         if pr_ids:
-            pr_ids_filter = f"in.({','.join(str(pid) for pid in pr_ids)})"
-            reviews = self.supabase.select("reviews", {"pull_request_id": pr_ids_filter})
-            review_comments = self.supabase.select("review_comments", {"pull_request_id": pr_ids_filter})
-            changed_files = self.supabase.select("changed_files", {"pull_request_id": pr_ids_filter})
+            for pid in pr_ids:
+                pr_reviews = self.supabase.select("reviews", {"pull_request_id": f"eq.{pid}"})
+                reviews.extend(pr_reviews)
+                pr_comments = self.supabase.select("review_comments", {"pull_request_id": f"eq.{pid}"})
+                review_comments.extend(pr_comments)
+                pr_files = self.supabase.select("changed_files", {"pull_request_id": f"eq.{pid}"})
+                changed_files.extend(pr_files)
 
         # Issue-dependent records
         issue_id_map: Dict[int, Dict[str, Any]] = {i["id"]: i for i in issues if "id" in i}
@@ -104,8 +107,9 @@ class KnowledgeGraphBuilder:
         issue_comments = []
 
         if issue_ids:
-            issue_ids_filter = f"in.({','.join(str(iid) for iid in issue_ids)})"
-            issue_comments = self.supabase.select("issue_comments", {"issue_id": issue_ids_filter})
+            for iid in issue_ids:
+                ics = self.supabase.select("issue_comments", {"issue_id": f"eq.{iid}"})
+                issue_comments.extend(ics)
 
         # Track count of operations
         nodes_created_or_updated = {
