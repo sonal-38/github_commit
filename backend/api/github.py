@@ -14,6 +14,7 @@ from schemas.issue import (
 from schemas.pull_request_file import PullRequestFileListResponse
 from ingestion.normalizer import IngestionSummaryResponse
 from ingestion.service import IngestionService
+from database.supabase_client import SupabaseConfigurationError, SupabaseDatabaseError
 
 router = APIRouter(
     prefix="/github",
@@ -283,31 +284,41 @@ def get_pull_request_files(owner: str, repo: str, pull_number: int):
 @router.post("/repositories/{owner}/{repo}/ingest", response_model=IngestionSummaryResponse)
 def ingest_repository(owner: str, repo: str):
     """
-    Ingest and normalize all engineering data for a specified repository.
+    Ingest, normalize, and store all engineering data for a specified repository in Supabase PostgreSQL.
     Fetches repositories, commits, PRs, reviews, comments, issues, issue comments,
-    and changed files, transforming them into a consistent internal normalized representation.
-    Note: Data is normalized and counted in-memory; no database storage is performed.
+    and changed files, transforming them into a consistent internal normalized representation
+    and persisting them into Supabase relational tables with foreign-key relationships.
 
     Args:
         owner: GitHub username or organization (e.g., 'sonal-38')
         repo: Repository name (e.g., 'smart-payment-platform')
 
     Returns:
-        IngestionSummaryResponse containing repository name, status, and entity counts.
+        IngestionSummaryResponse containing repository name, status, storage provider, and entity counts.
     """
-    service = IngestionService()
     try:
+        service = IngestionService()
         summary = service.ingest_repository(owner=owner, repo=repo)
         return summary
+    except SupabaseConfigurationError as cfg_err:
+        raise HTTPException(
+            status_code=400,
+            detail=str(cfg_err)
+        )
+    except SupabaseDatabaseError as db_err:
+        raise HTTPException(
+            status_code=db_err.status_code,
+            detail=db_err.message
+        )
     except GitHubClientError as err:
         raise HTTPException(
             status_code=err.status_code,
             detail=err.message
         )
-    except Exception:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail="An unexpected error occurred during ingestion and normalization"
+            detail="An unexpected error occurred during repository ingestion and database storage"
         )
 
 

@@ -124,6 +124,8 @@ class NormalizedChangedFile(BaseModel):
 
 class IngestionCounts(BaseModel):
     """Entity counts produced during an ingestion run."""
+    repositories: int = 0
+    developers: int = 0
     commits: int = 0
     pull_requests: int = 0
     reviews: int = 0
@@ -137,6 +139,7 @@ class IngestionSummaryResponse(BaseModel):
     """Summary response returned by the ingestion endpoint."""
     repository: str
     status: str = "completed"
+    storage: str = "supabase"
     counts: IngestionCounts
 
 

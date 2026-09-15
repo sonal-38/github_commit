@@ -6,6 +6,7 @@ pipeline, preserves relational links, and produces structured in-memory records.
 """
 from typing import Optional
 from github.client import GitHubClient, GitHubClientError
+from database.storage import SupabaseStorageService
 from ingestion.normalizer import (
     NormalizedRepository,
     NormalizedCommit,
@@ -29,14 +30,19 @@ from ingestion.normalizer import (
 
 
 class IngestionService:
-    """Service to ingest and normalize GitHub repository data."""
+    """Service to ingest, normalize, and store GitHub repository data in Supabase."""
 
-    def __init__(self, client: Optional[GitHubClient] = None):
+    def __init__(
+        self,
+        client: Optional[GitHubClient] = None,
+        storage_service: Optional[SupabaseStorageService] = None,
+    ):
         self.client = client or GitHubClient()
+        self.storage_service = storage_service or SupabaseStorageService()
 
     def ingest_repository(self, owner: str, repo: str) -> IngestionSummaryResponse:
         """
-        Execute full data ingestion and normalization for a given repository.
+        Execute full data ingestion, normalization, and Supabase storage for a repository.
 
         Coordinates:
         1. Repository metadata fetching & normalization
@@ -45,9 +51,10 @@ class IngestionService:
         4. PR Reviews, Review Comments, and Changed Files collection per PR
         5. Issues collection & normalization (PRs excluded)
         6. Issue Comments collection per Issue
+        7. Relational insertion/upsert into Supabase PostgreSQL
 
         Returns:
-            IngestionSummaryResponse with accurate entity counts.
+            IngestionSummaryResponse with accurate stored entity counts.
         """
         repo_full_name = f"{owner}/{repo}"
 
@@ -62,7 +69,7 @@ class IngestionService:
         else:
             raw_repo_data = {"name": repo, "owner_login": owner, "full_name": repo_full_name}
 
-        _normalized_repo = normalize_repository(raw_repo_data, default_owner=owner, default_repo=repo)
+        normalized_repo = normalize_repository(raw_repo_data, default_owner=owner, default_repo=repo)
 
         # 2. Fetch & Normalize Commits
         raw_commits = self.client.get_repository_commits(owner=owner, repo=repo)
@@ -116,19 +123,34 @@ class IngestionService:
             for comment in raw_issue_comments:
                 normalized_issue_comments.append(normalize_issue_comment(comment, repo_full_name, issue_num))
 
-        # 7. Construct Summary Response with Counts
+        # 7. Persist to Supabase PostgreSQL in relational dependency order
+        stored_counts = self.storage_service.store_all(
+            repository=normalized_repo,
+            commits=normalized_commits,
+            pull_requests=normalized_prs,
+            reviews=normalized_reviews,
+            review_comments=normalized_review_comments,
+            issues=normalized_issues,
+            issue_comments=normalized_issue_comments,
+            changed_files=normalized_changed_files,
+        )
+
+        # 8. Construct Summary Response with Stored Database Counts
         counts = IngestionCounts(
-            commits=len(normalized_commits),
-            pull_requests=len(normalized_prs),
-            reviews=len(normalized_reviews),
-            review_comments=len(normalized_review_comments),
-            issues=len(normalized_issues),
-            issue_comments=len(normalized_issue_comments),
-            changed_files=len(normalized_changed_files),
+            repositories=stored_counts.get("repositories", 1),
+            developers=stored_counts.get("developers", 0),
+            commits=stored_counts.get("commits", len(normalized_commits)),
+            pull_requests=stored_counts.get("pull_requests", len(normalized_prs)),
+            reviews=stored_counts.get("reviews", len(normalized_reviews)),
+            review_comments=stored_counts.get("review_comments", len(normalized_review_comments)),
+            issues=stored_counts.get("issues", len(normalized_issues)),
+            issue_comments=stored_counts.get("issue_comments", len(normalized_issue_comments)),
+            changed_files=stored_counts.get("changed_files", len(normalized_changed_files)),
         )
 
         return IngestionSummaryResponse(
             repository=repo_full_name,
             status="completed",
+            storage="supabase",
             counts=counts,
         )

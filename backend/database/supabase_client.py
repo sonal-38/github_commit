@@ -1,0 +1,147 @@
+"""
+Supabase PostgreSQL client integration.
+
+Reads SUPABASE_URL and SUPABASE_KEY from environment variables and exposes
+methods to interact with Supabase tables safely and reliably.
+"""
+import os
+import requests
+from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present
+load_dotenv()
+
+
+class SupabaseConfigurationError(Exception):
+    """Raised when Supabase credentials or environment variables are missing."""
+    pass
+
+
+class SupabaseDatabaseError(Exception):
+    """Raised when database operations encounter an error."""
+    def __init__(self, message: str, status_code: int = 500, details: Optional[str] = None):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.details = details
+
+
+class SupabaseClient:
+    """
+    Client for interacting with Supabase PostgreSQL via PostgREST API.
+    Supports resilient upsert, query, and batch operations without requiring
+    local PostgreSQL drivers or Docker.
+    """
+
+    def __init__(self, url: Optional[str] = None, key: Optional[str] = None):
+        self.url = (url or os.getenv("SUPABASE_URL", "")).rstrip("/")
+        self.key = key or os.getenv("SUPABASE_KEY", "")
+
+        if not self.url or not self.key:
+            raise SupabaseConfigurationError(
+                "Supabase configuration missing: SUPABASE_URL and SUPABASE_KEY "
+                "must be set in backend/.env"
+            )
+
+        self.rest_url = f"{self.url}/rest/v1"
+        self.headers = {
+            "apikey": self.key,
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+        }
+
+    def select(self, table: str, query_params: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        """
+        Execute a SELECT query against a Supabase table.
+        """
+        endpoint = f"{self.rest_url}/{table}"
+        try:
+            response = requests.get(
+                endpoint,
+                headers=self.headers,
+                params=query_params or {},
+                timeout=15
+            )
+        except requests.exceptions.RequestException as e:
+            raise SupabaseDatabaseError(f"Network error connecting to Supabase: {str(e)}", status_code=503)
+
+        if response.status_code not in (200, 206):
+            self._handle_error_response(response, table, "SELECT")
+
+        return response.json()
+
+    def upsert(
+        self,
+        table: str,
+        data: List[Dict[str, Any]] | Dict[str, Any],
+        on_conflict: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute an UPSERT operation into a Supabase table.
+        Merges duplicates on unique conflict keys and returns representations.
+        """
+        if not data:
+            return []
+
+        payload = data if isinstance(data, list) else [data]
+        endpoint = f"{self.rest_url}/{table}"
+
+        headers = dict(self.headers)
+        headers["Prefer"] = "resolution=merge-duplicates,return=representation"
+
+        params = {}
+        if on_conflict:
+            params["on_conflict"] = on_conflict
+
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                params=params,
+                json=payload,
+                timeout=20
+            )
+        except requests.exceptions.RequestException as e:
+            raise SupabaseDatabaseError(f"Network error connecting to Supabase: {str(e)}", status_code=503)
+
+        if response.status_code not in (200, 201):
+            self._handle_error_response(response, table, "UPSERT")
+
+        try:
+            result = response.json()
+            return result if isinstance(result, list) else [result]
+        except ValueError:
+            return []
+
+    def _handle_error_response(self, response: requests.Response, table: str, action: str):
+        """Standardized error handler hiding credentials from exceptions."""
+        try:
+            err_data = response.json()
+            msg = err_data.get("message") or err_data.get("details") or response.text
+        except Exception:
+            msg = response.text
+
+        status = response.status_code
+        if status == 401 or status == 403:
+            raise SupabaseDatabaseError(
+                "Supabase authentication failed. Please verify SUPABASE_KEY in backend/.env",
+                status_code=status
+            )
+        elif status == 404 or "does not exist" in msg.lower() or "relation" in msg.lower():
+            raise SupabaseDatabaseError(
+                f"Table '{table}' not found in Supabase. Please run database/schema.sql in the Supabase SQL Editor.",
+                status_code=404,
+                details=msg
+            )
+        else:
+            raise SupabaseDatabaseError(
+                f"Supabase {action} error on table '{table}': {msg}",
+                status_code=status,
+                details=msg
+            )
+
+
+def get_supabase_client() -> SupabaseClient:
+    """Factory helper to obtain a configured Supabase client."""
+    return SupabaseClient()
