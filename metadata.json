@@ -1,0 +1,6 @@
+{
+  "name": "AI Digital Shadow",
+  "description": "Backend API and developer intelligence services for AI Digital Shadow.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
