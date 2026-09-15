@@ -514,12 +514,22 @@ class KnowledgeGraphBuilder:
         connected to this repository.
         """
         self.neo4j.verify_connectivity()
-        full_name = f"{owner.strip()}/{repo.strip()}"
+        owner_clean = owner.strip()
+        repo_clean = repo.strip()
+        full_name = f"{owner_clean}/{repo_clean}"
 
-        # Verify repository exists in Neo4j
+        # Verify repository exists in Neo4j (check exact id or match with hyphen/underscore variations)
         check_repo = self.neo4j.execute_query(
-            "MATCH (r:Repository {id: $repo_id}) RETURN r.name as name",
-            {"repo_id": full_name}
+            """
+            MATCH (r:Repository)
+            WHERE r.id = $repo_id
+               OR toLower(r.id) = toLower($repo_id)
+               OR replace(toLower(r.id), '_', '-') = replace(toLower($repo_id), '_', '-')
+               OR replace(toLower(r.name), '_', '-') = replace(toLower($repo_name), '_', '-')
+            RETURN r.id as id, r.name as name, r.full_name as full_name
+            LIMIT 1
+            """,
+            {"repo_id": full_name, "repo_name": repo_clean}
         )
         if not check_repo:
             raise SupabaseDatabaseError(
@@ -527,6 +537,11 @@ class KnowledgeGraphBuilder:
                 f"Please build the graph first via POST /graph/repositories/{owner}/{repo}/build",
                 status_code=404
             )
+
+        # Use the matched repository ID for consistent sub-graph traversal
+        matched_repo_id = check_repo[0].get("id") or full_name
+        matched_repo_name = check_repo[0].get("name") or repo_clean
+        matched_full_name = check_repo[0].get("full_name") or matched_repo_id
 
         summary_query = """
         MATCH (r:Repository {id: $repo_id})
@@ -545,7 +560,7 @@ class KnowledgeGraphBuilder:
                count(DISTINCT i) as issues,
                count(DISTINCT ic) as issue_comments
         """
-        results = self.neo4j.execute_query(summary_query, {"repo_id": full_name})
+        results = self.neo4j.execute_query(summary_query, {"repo_id": matched_repo_id})
         counts = results[0] if results else {}
 
         # Query developers connected to this repository subgraph
@@ -553,7 +568,7 @@ class KnowledgeGraphBuilder:
         MATCH (r:Repository {id: $repo_id})-[*1..3]->(d:Developer)
         RETURN count(DISTINCT d) as developers
         """
-        dev_results = self.neo4j.execute_query(dev_query, {"repo_id": full_name})
+        dev_results = self.neo4j.execute_query(dev_query, {"repo_id": matched_repo_id})
         dev_count = dev_results[0].get("developers", 0) if dev_results else 0
 
         # Query total relationships connected in this repository subgraph
@@ -561,12 +576,12 @@ class KnowledgeGraphBuilder:
         MATCH (r:Repository {id: $repo_id})-[rel*1..3]-(n)
         RETURN count(DISTINCT last(rel)) as count
         """
-        rel_results = self.neo4j.execute_query(rel_query, {"repo_id": full_name})
+        rel_results = self.neo4j.execute_query(rel_query, {"repo_id": matched_repo_id})
         total_rels = rel_results[0].get("count", 0) if rel_results else 0
 
         return {
-            "repository": repo.strip(),
-            "full_name": full_name,
+            "repository": matched_repo_name,
+            "full_name": matched_full_name,
             "status": "active",
             "nodes": {
                 "repositories": 1,
