@@ -25,6 +25,12 @@ def read_root():
         "endpoints": {
             "docs": "/docs",
             "repositories": "/github/repositories",
-            "commits": "/github/repositories/{owner}/{repo}/commits"
+            "commits": "/github/repositories/{owner}/{repo}/commits",
+            "pull_requests": "/github/repositories/{owner}/{repo}/pull-requests",
+            "pr_reviews": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/reviews",
+            "pr_comments": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/comments",
+            "issues": "/github/repositories/{owner}/{repo}/issues",
+            "issue_comments": "/github/repositories/{owner}/{repo}/issues/{issue_number}/comments",
+            "pr_files": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/files"
         }
     }

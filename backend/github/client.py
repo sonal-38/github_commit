@@ -182,3 +182,470 @@ class GitHubClient:
             page += 1
 
         return all_commits
+
+    def get_repository_pull_requests(self, owner: str, repo: str) -> List[Dict[str, Any]]:
+        """
+        Fetch all pull requests (open, closed, merged) for a repository with pagination.
+        Processes pages of 100 pull requests until no more are returned.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls"
+        all_prs: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "state": "all",
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            # Handle specific HTTP status codes
+            if response.status_code == 404:
+                raise GitHubClientError("GitHub repository not found", status_code=404)
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                prs_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            # If response is not a list or is empty, we reached the end
+            if not isinstance(prs_data, list) or len(prs_data) == 0:
+                break
+
+            for item in prs_data:
+                user_info = item.get("user") or {}
+
+                all_prs.append({
+                    "number": item.get("number"),
+                    "title": item.get("title", ""),
+                    "body": item.get("body"),
+                    "state": item.get("state", "unknown"),
+                    "user_login": user_info.get("login"),
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "closed_at": item.get("closed_at"),
+                    "merged_at": item.get("merged_at"),
+                    "merge_commit_sha": item.get("merge_commit_sha"),
+                    "html_url": item.get("html_url"),
+                })
+
+            # Safe stopping condition: fewer items than per_page means we are on the final page
+            if len(prs_data) < per_page:
+                break
+
+            page += 1
+
+        return all_prs
+
+    def get_pull_request_reviews(self, owner: str, repo: str, pull_number: int) -> List[Dict[str, Any]]:
+        """
+        Fetch all reviews for a specific pull request with pagination.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
+        all_reviews: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError("Pull request or repository not found", status_code=404)
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                reviews_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(reviews_data, list) or len(reviews_data) == 0:
+                break
+
+            for item in reviews_data:
+                user_info = item.get("user") or {}
+                all_reviews.append({
+                    "id": item.get("id"),
+                    "user_login": user_info.get("login"),
+                    "body": item.get("body"),
+                    "state": item.get("state", "COMMENTED"),
+                    "submitted_at": item.get("submitted_at"),
+                    "commit_id": item.get("commit_id"),
+                    "html_url": item.get("html_url"),
+                })
+
+            if len(reviews_data) < per_page:
+                break
+
+            page += 1
+
+        return all_reviews
+
+    def get_pull_request_comments(self, owner: str, repo: str, pull_number: int) -> List[Dict[str, Any]]:
+        """
+        Fetch all review comments (inline/diff comments) for a specific pull request with pagination.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/comments"
+        all_comments: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError("Pull request or repository not found", status_code=404)
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                comments_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(comments_data, list) or len(comments_data) == 0:
+                break
+
+            for item in comments_data:
+                user_info = item.get("user") or {}
+                all_comments.append({
+                    "id": item.get("id"),
+                    "user_login": user_info.get("login"),
+                    "body": item.get("body"),
+                    "path": item.get("path"),
+                    "line": item.get("line"),
+                    "diff_hunk": item.get("diff_hunk"),
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "commit_id": item.get("commit_id"),
+                    "html_url": item.get("html_url"),
+                })
+
+            if len(comments_data) < per_page:
+                break
+
+            page += 1
+
+        return all_comments
+
+    def get_repository_issues(self, owner: str, repo: str) -> List[Dict[str, Any]]:
+        """
+        Fetch all issues for a repository (excluding pull requests) with pagination.
+        Processes pages of 100 issues until no more are returned.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues"
+        all_issues: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "state": "all",
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError("GitHub repository not found", status_code=404)
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                issues_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(issues_data, list) or len(issues_data) == 0:
+                break
+
+            for item in issues_data:
+                # GitHub's issues endpoint includes pull requests; exclude them
+                if "pull_request" in item:
+                    continue
+
+                user_info = item.get("user") or {}
+                raw_labels = item.get("labels") or []
+                raw_assignees = item.get("assignees") or []
+
+                labels = [
+                    lbl.get("name")
+                    for lbl in raw_labels
+                    if isinstance(lbl, dict) and lbl.get("name")
+                ]
+                assignees = [
+                    assignee.get("login")
+                    for assignee in raw_assignees
+                    if isinstance(assignee, dict) and assignee.get("login")
+                ]
+
+                all_issues.append({
+                    "number": item.get("number"),
+                    "title": item.get("title", ""),
+                    "body": item.get("body"),
+                    "state": item.get("state", "open"),
+                    "user_login": user_info.get("login"),
+                    "labels": labels,
+                    "assignees": assignees,
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "closed_at": item.get("closed_at"),
+                    "html_url": item.get("html_url"),
+                })
+
+            if len(issues_data) < per_page:
+                break
+
+            page += 1
+
+        return all_issues
+
+    def get_issue_comments(self, owner: str, repo: str, issue_number: int) -> List[Dict[str, Any]]:
+        """
+        Fetch all comments for a specific issue with pagination.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        all_comments: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError("Issue or repository not found", status_code=404)
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                comments_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(comments_data, list) or len(comments_data) == 0:
+                break
+
+            for item in comments_data:
+                user_info = item.get("user") or {}
+                all_comments.append({
+                    "id": item.get("id"),
+                    "user_login": user_info.get("login"),
+                    "body": item.get("body"),
+                    "created_at": item.get("created_at"),
+                    "updated_at": item.get("updated_at"),
+                    "html_url": item.get("html_url"),
+                })
+
+            if len(comments_data) < per_page:
+                break
+
+            page += 1
+
+        return all_comments
+
+    def get_pull_request_files(self, owner: str, repo: str, pull_number: int) -> List[Dict[str, Any]]:
+        """
+        Fetch all changed files for a specific pull request with pagination.
+        Processes pages of 100 files until no more are returned.
+        """
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/files"
+        all_files: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError("Pull request or repository not found", status_code=404)
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                files_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(files_data, list) or len(files_data) == 0:
+                break
+
+            for item in files_data:
+                all_files.append({
+                    "filename": item.get("filename", ""),
+                    "status": item.get("status", "modified"),
+                    "additions": item.get("additions", 0),
+                    "deletions": item.get("deletions", 0),
+                    "changes": item.get("changes", 0),
+                    "blob_url": item.get("blob_url"),
+                    "raw_url": item.get("raw_url"),
+                    "contents_url": item.get("contents_url"),
+                    "sha": item.get("sha"),
+                    "patch": item.get("patch"),
+                })
+
+            if len(files_data) < per_page:
+                break
+
+            page += 1
+
+        return all_files
+
+
