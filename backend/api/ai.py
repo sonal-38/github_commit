@@ -8,6 +8,7 @@ Endpoints:
     or executes pgvector semantic search, and invokes Gemini to synthesize a grounded answer.
 """
 from typing import Any, Dict, List, Optional
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -15,6 +16,8 @@ from ai.rag_service import RAGService
 from ai.gemini_service import GeminiConfigurationError, GeminiAPIError
 from database.supabase_client import SupabaseConfigurationError, SupabaseDatabaseError
 from vector.embeddings import EmbeddingError
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/ai",
@@ -89,4 +92,5 @@ def ask_question(request: AskRequest) -> AskResponse:
     except EmbeddingError as e:
         raise HTTPException(status_code=500, detail=f"Embedding Error: {str(e)}")
     except Exception as e:
+        logger.exception("Unexpected error in /ai/ask endpoint: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Internal RAG pipeline error: {str(e)}")

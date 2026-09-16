@@ -88,10 +88,21 @@ class SupabaseClient:
         endpoint = f"{self.rest_url}/{table}"
         if query_params:
             # Build query string preserving literal PostgREST syntax like in.(1,2) and eq.val
+            # Ensure query values (especially '+' in timezone offsets like +00:00) are properly URL-encoded
+            import urllib.parse
+
+            def encode_postgrest_val(val: str) -> str:
+                # PostgREST syntax is <operator>.<value> (e.g. gte.2026-08-01T00:00:00+00:00)
+                if "." in val:
+                    op, rest = val.split(".", 1)
+                    # Quote the value part so '+' becomes '%2B' and doesn't get parsed as space ' '
+                    return f"{op}.{urllib.parse.quote(rest, safe='')}"
+                return urllib.parse.quote(val, safe='')
+
             if isinstance(query_params, dict):
-                parts = [f"{k}={v}" for k, v in query_params.items()]
+                parts = [f"{k}={encode_postgrest_val(str(v))}" for k, v in query_params.items()]
             else:
-                parts = [f"{k}={v}" for k, v in query_params]
+                parts = [f"{k}={encode_postgrest_val(str(v))}" for k, v in query_params]
             endpoint = f"{endpoint}?{'&'.join(parts)}"
 
         try:
