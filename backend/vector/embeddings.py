@@ -194,7 +194,11 @@ class EmbeddingService:
             raise EmbeddingError("Neither google-genai nor requests library is installed.")
 
         key = self._get_api_key()
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:embedContent?key={key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:embedContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key,
+        }
 
         results: List[List[float]] = []
 
@@ -210,17 +214,27 @@ class EmbeddingService:
             try:
                 resp = requests.post(
                     url,
+                    params={"key": key},
                     json=payload,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                     timeout=20,
                 )
             except requests.exceptions.RequestException as e:
                 raise EmbeddingError(f"Network error communicating with Gemini Embeddings API: {str(e)}")
 
-            if resp.status_code == 400 and "API_KEY_INVALID" in resp.text:
-                raise EmbeddingError("Invalid GEMINI_API_KEY provided in backend/.env.", status_code=401)
+            if resp.status_code == 401 or (resp.status_code == 400 and "API_KEY_INVALID" in resp.text):
+                raise EmbeddingError(
+                    f"Gemini API authentication failed (HTTP {resp.status_code}). "
+                    "Please verify your GEMINI_API_KEY in backend/.env or your environment variables, "
+                    "and ensure the Gemini API is enabled in your Google AI Studio / Google Cloud project.",
+                    status_code=401,
+                )
             elif resp.status_code == 403:
-                raise EmbeddingError("Gemini API access denied. Check your GEMINI_API_KEY permissions.", status_code=403)
+                raise EmbeddingError(
+                    f"Gemini API access denied (HTTP 403). Check that your GEMINI_API_KEY has permission "
+                    f"to access model '{self.model_name}' and that billing/quotas are enabled.",
+                    status_code=403,
+                )
             elif resp.status_code != 200:
                 raise EmbeddingError(
                     f"Gemini Embeddings API error HTTP {resp.status_code}: {resp.text}",
