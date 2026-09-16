@@ -60,14 +60,20 @@ class GeminiService:
             )
 
         if self._client is None:
+            # Check if key is set in environment or object
+            api_key = self.api_key
+            # Clean possible quote wrappers or whitespace
+            api_key = api_key.strip().strip("\"' \t\r\n\u200b\ufeff")
+
             try:
                 from google import genai
-                self._client = genai.Client(api_key=self.api_key)
+                # The google-genai SDK uses api_key=... for AI Studio developer API keys
+                self._client = genai.Client(api_key=api_key)
             except ImportError:
-                # If google-genai is not installed, we can fall back to google.generativeai or requests
+                # If google-genai is not installed, fall back to google.generativeai or REST
                 try:
                     import google.generativeai as legacy_genai
-                    legacy_genai.configure(api_key=self.api_key)
+                    legacy_genai.configure(api_key=api_key)
                     self._client = legacy_genai.GenerativeModel(self.model_name)
                     self._is_legacy = True
                     return self._client
