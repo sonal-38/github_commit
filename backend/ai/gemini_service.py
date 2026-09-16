@@ -115,7 +115,8 @@ class GeminiService:
         )
 
         # Google official Gemini API documentation:
-        # Gemini API requests use an API key through the x-goog-api-key header.
+        # Gemini API requests accept API keys via x-goog-api-key or ?key=.
+        # For new Google AI Studio Authentication Keys (AQ.), try x-goog-api-key, ?key=, and Authorization: Bearer
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
         
         headers = {
@@ -139,12 +140,37 @@ class GeminiService:
 
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
-            # If rejected with 401/400 and key was passed in header, also try query param fallback ?key=
-            if resp.status_code in (401, 403):
+            
+            # If 401 occurs, try ?key= query parameter (some gateways only inspect URL query params for AQ keys)
+            if resp.status_code == 401:
                 query_url = f"{url}?key={api_key}"
-                retry_resp = requests.post(query_url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+                retry_resp = requests.post(
+                    query_url, 
+                    json=payload, 
+                    headers={"Content-Type": "application/json"}, 
+                    timeout=30
+                )
                 if retry_resp.status_code == 200:
                     resp = retry_resp
+                elif retry_resp.status_code != 401:
+                    resp = retry_resp
+                    
+            # If still 401 and it is an AQ. or OAuth token, try Authorization: Bearer
+            if resp.status_code == 401 and (api_key.startswith("AQ.") or api_key.startswith("ya29.")):
+                bearer_headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                }
+                bearer_resp = requests.post(
+                    url,
+                    json=payload,
+                    headers=bearer_headers,
+                    timeout=30
+                )
+                if bearer_resp.status_code == 200:
+                    resp = bearer_resp
+                elif bearer_resp.status_code != 401:
+                    resp = bearer_resp
         except requests.exceptions.Timeout:
             raise GeminiAPIError("Request to Gemini API timed out after 30 seconds.")
         except requests.exceptions.ConnectionError as e:
