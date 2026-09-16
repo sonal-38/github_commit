@@ -39,8 +39,10 @@ class VectorIndexer:
         converts them to semantic documents, embeds them, and upserts to Qdrant.
         Idempotent: Re-running this replaces/updates existing points rather than duplicating.
         """
-        self.supabase.verify_connectivity()
-        self.qdrant.verify_connectivity()
+        if hasattr(self.supabase, "verify_connectivity"):
+            self.supabase.verify_connectivity()
+        if hasattr(self.qdrant, "verify_connectivity"):
+            self.qdrant.verify_connectivity()
 
         owner_clean = owner.strip()
         repo_clean = repo.strip()

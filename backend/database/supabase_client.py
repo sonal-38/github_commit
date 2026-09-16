@@ -56,6 +56,25 @@ class SupabaseClient:
             "Content-Type": "application/json",
         }
 
+    def verify_connectivity(self) -> bool:
+        """Verifies connection to the Supabase REST API."""
+        try:
+            # Query the root REST endpoint to check headers and reachability
+            resp = requests.get(self.rest_url, headers=self.headers, timeout=10)
+            if resp.status_code in (200, 404):
+                return True
+            if resp.status_code == 401:
+                raise SupabaseDatabaseError(
+                    "Supabase authentication failed: Invalid SUPABASE_KEY",
+                    status_code=401,
+                )
+            return True
+        except requests.exceptions.RequestException as e:
+            raise SupabaseDatabaseError(
+                f"Failed to connect to Supabase: {str(e)}",
+                status_code=503,
+            )
+
     def select(self, table: str, query_params: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
         Execute a SELECT query against a Supabase table.
