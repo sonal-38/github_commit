@@ -49,10 +49,21 @@ class GeminiService:
         self.model_name = model_name or os.getenv("GEMINI_MODEL", self.DEFAULT_MODEL)
 
     def _ensure_api_key(self) -> str:
-        """Validates that a Gemini API key is configured."""
+        """Validates and refreshes the Gemini API key from environment."""
+        # Always re-read from os.getenv to catch changes without requiring a full server restart
+        raw_key = os.getenv("GEMINI_API_KEY", "") or self.api_key or ""
+        self.api_key = raw_key.strip().strip("\"' \t\r\n\u200b\ufeff")
+
         if not self.api_key:
-            raw_key = os.getenv("GEMINI_API_KEY", "")
-            self.api_key = raw_key.strip().strip("\"' \t\r\n\u200b\ufeff")
+            # Try reloading dotenv explicitly in case it was modified
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(override=True)
+                load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"), override=True)
+                raw_key = os.getenv("GEMINI_API_KEY", "")
+                self.api_key = raw_key.strip().strip("\"' \t\r\n\u200b\ufeff")
+            except Exception:
+                pass
 
         if not self.api_key:
             raise GeminiConfigurationError(
@@ -103,13 +114,15 @@ class GeminiService:
             f"=== GROUNDED ANSWER ==="
         )
 
-        # Google AI REST API accepts API key via x-goog-api-key header or ?key= query parameter.
-        # Sending both ensures compatibility regardless of proxy or gateway configuration.
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={api_key}"
+        # Google official Gemini API documentation:
+        # Gemini API requests use an API key through the x-goog-api-key header.
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
+        
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key,
         }
+        
         payload = {
             "system_instruction": {
                 "parts": [{"text": sys_prompt}]
@@ -126,6 +139,12 @@ class GeminiService:
 
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=30)
+            # If rejected with 401/400 and key was passed in header, also try query param fallback ?key=
+            if resp.status_code in (401, 403):
+                query_url = f"{url}?key={api_key}"
+                retry_resp = requests.post(query_url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+                if retry_resp.status_code == 200:
+                    resp = retry_resp
         except requests.exceptions.Timeout:
             raise GeminiAPIError("Request to Gemini API timed out after 30 seconds.")
         except requests.exceptions.ConnectionError as e:
