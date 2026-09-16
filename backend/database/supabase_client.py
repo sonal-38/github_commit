@@ -6,7 +6,7 @@ methods to interact with Supabase tables safely and reliably.
 """
 import os
 import requests
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 from dotenv import load_dotenv
 
 # Load environment variables from .env if present
@@ -75,15 +75,23 @@ class SupabaseClient:
                 status_code=503,
             )
 
-    def select(self, table: str, query_params: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    def select(
+        self,
+        table: str,
+        query_params: Optional[Union[Dict[str, str], List[Tuple[str, str]]]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Execute a SELECT query against a Supabase table.
         Preserves PostgREST query parameters (eq, in, etc.) without malformed encoding.
+        Supports both Dict[str, str] and List[Tuple[str, str]] (for multi-filter on same column).
         """
         endpoint = f"{self.rest_url}/{table}"
         if query_params:
             # Build query string preserving literal PostgREST syntax like in.(1,2) and eq.val
-            parts = [f"{k}={v}" for k, v in query_params.items()]
+            if isinstance(query_params, dict):
+                parts = [f"{k}={v}" for k, v in query_params.items()]
+            else:
+                parts = [f"{k}={v}" for k, v in query_params]
             endpoint = f"{endpoint}?{'&'.join(parts)}"
 
         try:
