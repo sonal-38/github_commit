@@ -174,7 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_changed_files_pull_request_id ON public.changed_f
 -- Enable the pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Table for storing semantic text embeddings
+-- Table for storing semantic text embeddings (Gemini gemini-embedding-001, 768 dimensions)
 CREATE TABLE IF NOT EXISTS public.document_embeddings (
     id TEXT PRIMARY KEY,
     repository TEXT NOT NULL,
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS public.document_embeddings (
     source_id TEXT NOT NULL,
     developer TEXT,
     text TEXT NOT NULL,
-    embedding VECTOR(384),
+    embedding VECTOR(768),
     metadata JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -202,7 +202,7 @@ ON public.document_embeddings USING hnsw (embedding vector_cosine_ops);
 -- Semantic Similarity Search Function (PostgREST RPC)
 -- =====================================================================
 CREATE OR REPLACE FUNCTION public.match_documents (
-    query_embedding VECTOR(384),
+    query_embedding VECTOR(768),
     match_count INT DEFAULT 5,
     filter_repository TEXT DEFAULT NULL
 )

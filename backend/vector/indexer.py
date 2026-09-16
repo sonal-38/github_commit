@@ -204,15 +204,21 @@ class VectorIndexer:
                 "message": "No indexable documents found for repository.",
             }
 
-        # 4. Generate embeddings in batches
+        # 4. Generate embeddings in batches using Gemini RETRIEVAL_DOCUMENT
         texts_to_embed = [doc.text for doc in documents]
-        vectors = self.embeddings.embed_batch(texts_to_embed, batch_size=32)
+        vectors = self.embeddings.embed_batch(
+            texts_to_embed,
+            task_type="RETRIEVAL_DOCUMENT",
+            batch_size=20,
+        )
 
         # 5. Prepare records for Supabase pgvector table (document_embeddings)
         # Uses deterministic stable_key as the primary key 'id' to guarantee idempotency.
         now_iso = datetime.now(timezone.utc).isoformat()
         records = []
         for doc, vec in zip(documents, vectors):
+            doc_meta = dict(doc.metadata or {})
+            doc_meta["embedding_model"] = "gemini-embedding-001"
             records.append({
                 "id": doc.stable_key,
                 "repository": doc.repository,
@@ -221,7 +227,7 @@ class VectorIndexer:
                 "developer": doc.developer,
                 "text": doc.text,
                 "embedding": vec,
-                "metadata": doc.metadata,
+                "metadata": doc_meta,
                 "updated_at": now_iso,
             })
 
@@ -258,8 +264,8 @@ class VectorIndexer:
         if not clean_query:
             return {"query": query, "results": []}
 
-        # 1. Generate query embedding (384 dimensions)
-        query_vector = self.embeddings.embed_text(clean_query)
+        # 1. Generate query embedding using Gemini RETRIEVAL_QUERY (768 dimensions)
+        query_vector = self.embeddings.embed_text(clean_query, task_type="RETRIEVAL_QUERY")
 
         # 2. Execute pgvector cosine similarity search via Supabase RPC
         rpc_params: Dict[str, Any] = {
