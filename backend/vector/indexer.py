@@ -3,14 +3,14 @@ Vector Indexer and Search pipeline.
 
 Extracts normalized records from Supabase (without calling GitHub),
 constructs semantic documents, embeds them using SentenceTransformers,
-and upserts deterministic vectors to Qdrant Cloud.
+and upserts deterministic vectors to Supabase PostgreSQL (pgvector).
 Also provides semantic similarity retrieval with optional repository filtering.
 """
+from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional
 
 from database.supabase_client import SupabaseClient, SupabaseDatabaseError
-from database.qdrant_client import QdrantDatabaseClient
 from vector.embeddings import EmbeddingService
 from vector.document_builder import DocumentBuilder, DocumentItem
 
@@ -20,29 +20,25 @@ logger = logging.getLogger(__name__)
 class VectorIndexer:
     """
     Coordinates data extraction from Supabase, document building,
-    embedding generation, and idempotent vector storage in Qdrant.
+    embedding generation, and idempotent vector storage in Supabase pgvector.
     """
 
     def __init__(
         self,
         supabase_client: Optional[SupabaseClient] = None,
-        qdrant_client: Optional[QdrantDatabaseClient] = None,
         embedding_service: Optional[EmbeddingService] = None,
     ):
         self.supabase = supabase_client or SupabaseClient()
-        self.qdrant = qdrant_client or QdrantDatabaseClient()
         self.embeddings = embedding_service or EmbeddingService()
 
     def index_repository(self, owner: str, repo: str) -> Dict[str, Any]:
         """
         Loads all relational records for the repository from Supabase,
-        converts them to semantic documents, embeds them, and upserts to Qdrant.
-        Idempotent: Re-running this replaces/updates existing points rather than duplicating.
+        converts them to semantic documents, embeds them, and upserts to Supabase pgvector.
+        Idempotent: Re-running this replaces/updates existing records on primary key conflict.
         """
         if hasattr(self.supabase, "verify_connectivity"):
             self.supabase.verify_connectivity()
-        if hasattr(self.qdrant, "verify_connectivity"):
-            self.qdrant.verify_connectivity()
 
         owner_clean = owner.strip()
         repo_clean = repo.strip()
@@ -208,34 +204,39 @@ class VectorIndexer:
                 "message": "No indexable documents found for repository.",
             }
 
-        # 4. Ensure Qdrant collection exists with matching vector dimension
-        vector_dim = self.embeddings.dimension
-        self.qdrant.ensure_collection(vector_dimension=vector_dim)
-
-        # 5. Generate embeddings in batches
+        # 4. Generate embeddings in batches
         texts_to_embed = [doc.text for doc in documents]
         vectors = self.embeddings.embed_batch(texts_to_embed, batch_size=32)
 
-        # 6. Prepare Qdrant PointStructs and upsert
-        from qdrant_client.http.models import PointStruct
-
-        points = []
+        # 5. Prepare records for Supabase pgvector table (document_embeddings)
+        # Uses deterministic stable_key as the primary key 'id' to guarantee idempotency.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        records = []
         for doc, vec in zip(documents, vectors):
-            points.append(
-                PointStruct(
-                    id=doc.point_id,
-                    vector=vec,
-                    payload=doc.to_payload(),
-                )
+            records.append({
+                "id": doc.stable_key,
+                "repository": doc.repository,
+                "document_type": doc.document_type,
+                "source_id": doc.source_id,
+                "developer": doc.developer,
+                "text": doc.text,
+                "embedding": vec,
+                "metadata": doc.metadata,
+                "updated_at": now_iso,
+            })
+
+        # 6. Upsert in batches into Supabase PostgreSQL (pgvector)
+        # on_conflict="id" ensures duplicate prevention: updates existing rows if re-indexed.
+        chunk_size = 50
+        for i in range(0, len(records), chunk_size):
+            chunk = records[i : i + chunk_size]
+            self.supabase.upsert(
+                table="document_embeddings",
+                data=chunk,
+                on_conflict="id",
             )
 
-        # Upsert in chunks to avoid single payload limits
-        chunk_size = 50
-        for i in range(0, len(points), chunk_size):
-            chunk = points[i : i + chunk_size]
-            self.qdrant.upsert_points(chunk)
-
-        total_vectors = len(points)
+        total_vectors = len(records)
 
         return {
             "repository": resolved_full_name,
@@ -250,21 +251,38 @@ class VectorIndexer:
         limit: int = 5,
     ) -> Dict[str, Any]:
         """
-        Embeds the search query and retrieves the most semantically relevant documents.
+        Embeds the search query and retrieves the most semantically relevant documents
+        from Supabase PostgreSQL using the pgvector cosine similarity function match_documents.
         """
         clean_query = (query or "").strip()
         if not clean_query:
             return {"query": query, "results": []}
 
-        # 1. Generate query embedding
+        # 1. Generate query embedding (384 dimensions)
         query_vector = self.embeddings.embed_text(clean_query)
 
-        # 2. Search Qdrant
-        results = self.qdrant.search_similar(
-            query_vector=query_vector,
-            limit=limit,
-            repository_filter=repository,
-        )
+        # 2. Execute pgvector cosine similarity search via Supabase RPC
+        rpc_params: Dict[str, Any] = {
+            "query_embedding": query_vector,
+            "match_count": limit,
+        }
+        if repository and repository.strip():
+            rpc_params["filter_repository"] = repository.strip()
+
+        matches = self.supabase.rpc("match_documents", rpc_params)
+
+        # 3. Format results to preserve API schema
+        results = []
+        for row in matches:
+            results.append({
+                "score": float(row.get("similarity", 0.0)),
+                "document_type": row.get("document_type", ""),
+                "repository": row.get("repository", ""),
+                "developer": row.get("developer") or "Unknown",
+                "source_id": str(row.get("source_id", "")),
+                "text": row.get("text", ""),
+                "metadata": row.get("metadata") or {},
+            })
 
         return {
             "query": clean_query,

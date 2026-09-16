@@ -4,5 +4,4 @@ requests>=2.31.0
 python-dotenv>=1.0.1
 supabase>=2.0.0
 neo4j>=5.18.0
-qdrant-client>=1.8.0
 sentence-transformers>=2.5.0

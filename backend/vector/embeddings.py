@@ -95,7 +95,7 @@ class EmbeddingService:
                 convert_to_numpy=True,
                 normalize_embeddings=True,
             )
-            # Convert numpy array to list of floats for JSON / Qdrant serialization
+            # Convert numpy array to list of floats for JSON / pgvector serialization
             return [vec.tolist() for vec in embeddings]
         except Exception as e:
             raise EmbeddingError(

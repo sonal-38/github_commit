@@ -168,6 +168,76 @@ CREATE INDEX IF NOT EXISTS idx_changed_files_pull_request_id ON public.changed_f
 
 
 -- =====================================================================
+-- 10. Document Embeddings (pgvector Semantic Search)
+-- =====================================================================
+
+-- Enable the pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Table for storing semantic text embeddings
+CREATE TABLE IF NOT EXISTS public.document_embeddings (
+    id TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    document_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    developer TEXT,
+    text TEXT NOT NULL,
+    embedding VECTOR(384),
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indices for repository filtering and metadata queries
+CREATE INDEX IF NOT EXISTS idx_document_embeddings_repository ON public.document_embeddings(repository);
+CREATE INDEX IF NOT EXISTS idx_document_embeddings_doc_type ON public.document_embeddings(document_type);
+CREATE INDEX IF NOT EXISTS idx_document_embeddings_source_id ON public.document_embeddings(source_id);
+
+-- Cosine distance vector index (HNSW) for fast nearest neighbor search
+CREATE INDEX IF NOT EXISTS idx_document_embeddings_embedding 
+ON public.document_embeddings USING hnsw (embedding vector_cosine_ops);
+
+
+-- =====================================================================
+-- Semantic Similarity Search Function (PostgREST RPC)
+-- =====================================================================
+CREATE OR REPLACE FUNCTION public.match_documents (
+    query_embedding VECTOR(384),
+    match_count INT DEFAULT 5,
+    filter_repository TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+    id TEXT,
+    repository TEXT,
+    document_type TEXT,
+    source_id TEXT,
+    developer TEXT,
+    text TEXT,
+    metadata JSONB,
+    similarity FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        d.id,
+        d.repository,
+        d.document_type,
+        d.source_id,
+        d.developer,
+        d.text,
+        d.metadata,
+        ROUND((1 - (d.embedding <=> query_embedding))::numeric, 4)::float AS similarity
+    FROM public.document_embeddings d
+    WHERE (filter_repository IS NULL OR d.repository = filter_repository)
+    ORDER BY d.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+
+-- =====================================================================
 -- Permissions and Row-Level-Security (RLS) Configuration
 -- Ensures Supabase PostgREST API can read/write to the tables
 -- =====================================================================
@@ -182,18 +252,21 @@ ALTER TABLE public.review_comments DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.issues DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.issue_comments DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.changed_files DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.document_embeddings DISABLE ROW LEVEL SECURITY;
 
 -- Grant access on public schema and all tables to standard roles
 GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, anon, authenticated, service_role;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
 GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.match_documents(VECTOR(384), INT, TEXT) TO postgres, anon, authenticated, service_role;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO postgres, anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO postgres, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO postgres, anon, authenticated, service_role;
 
 -- =====================================================================
 -- Reload PostgREST Schema Cache
--- CRUCIAL: Tells Supabase API layer to immediately index the new tables
+-- CRUCIAL: Tells Supabase API layer to immediately index the new tables and RPC functions
 -- =====================================================================
 NOTIFY pgrst, 'reload schema';

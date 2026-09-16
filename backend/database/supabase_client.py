@@ -143,6 +143,38 @@ class SupabaseClient:
         except ValueError:
             return []
 
+    def rpc(
+        self,
+        function_name: str,
+        params: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes a PostgreSQL Remote Procedure Call (RPC) via PostgREST.
+        Used for pgvector similarity search, custom SQL functions, and aggregations.
+        """
+        endpoint = f"{self.rest_url}/rpc/{function_name}"
+        try:
+            response = requests.post(
+                endpoint,
+                headers=self.headers,
+                json=params or {},
+                timeout=25
+            )
+        except requests.exceptions.RequestException as e:
+            raise SupabaseDatabaseError(
+                f"Network error calling Supabase RPC '{function_name}': {str(e)}",
+                status_code=503
+            )
+
+        if response.status_code not in (200, 206):
+            self._handle_error_response(response, f"rpc/{function_name}", "RPC")
+
+        try:
+            result = response.json()
+            return result if isinstance(result, list) else [result]
+        except ValueError:
+            return []
+
     def _handle_error_response(self, response: requests.Response, table: str, action: str):
         """Standardized error handler hiding credentials from exceptions."""
         try:
@@ -172,6 +204,14 @@ class SupabaseClient:
             )
         elif status == 404 or "does not exist" in msg.lower() or "relation" in msg.lower():
             hint_str = f" (Hint: {hint})" if hint else ""
+            if table.startswith("rpc/"):
+                fn = table.split("/", 1)[1]
+                raise SupabaseDatabaseError(
+                    f"PostgreSQL function '{fn}' was not found in Supabase public schema{hint_str}. "
+                    "Please run database/schema.sql in the Supabase SQL Editor to create the 'match_documents' function and 'document_embeddings' table.",
+                    status_code=404,
+                    details=msg
+                )
             raise SupabaseDatabaseError(
                 f"Table '{table}' was not found in Supabase public schema{hint_str}. "
                 "Please run database/schema.sql in the Supabase SQL Editor and ensure 'NOTIFY pgrst, ''reload schema'';' is executed.",

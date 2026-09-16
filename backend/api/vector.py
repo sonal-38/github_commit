@@ -1,12 +1,12 @@
 """
-FastAPI router for Vector Database (Qdrant) and Semantic Search endpoints.
+FastAPI router for Vector Database (Supabase PostgreSQL + pgvector) and Semantic Search endpoints.
 
 Endpoints:
 - POST /vector/repositories/{owner}/{repo}/index:
     Loads relational GitHub data from Supabase, builds semantic documents,
-    generates embeddings, and upserts them into Qdrant Cloud.
+    generates embeddings, and upserts them into Supabase PostgreSQL (pgvector).
 - GET /vector/search:
-    Performs semantic vector search against Qdrant collection using query embedding.
+    Performs semantic vector search against Supabase pgvector using query embedding.
 """
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Path
@@ -14,11 +14,6 @@ from pydantic import BaseModel, Field
 
 from vector.indexer import VectorIndexer
 from vector.embeddings import EmbeddingError
-from database.qdrant_client import (
-    QdrantConfigurationError,
-    QdrantConnectionError,
-    QdrantOperationError,
-)
 from database.supabase_client import (
     SupabaseConfigurationError,
     SupabaseDatabaseError,
@@ -65,10 +60,11 @@ class SearchResponse(BaseModel):
 @router.post(
     "/repositories/{owner}/{repo}/index",
     response_model=VectorIndexResponse,
-    summary="Index repository records from Supabase into Qdrant Cloud",
+    summary="Index repository records from Supabase into pgvector",
     description=(
         "Reads normalized repository records from Supabase, transforms them into domain-rich "
-        "semantic documents, generates vector embeddings, and idempotently upserts them into Qdrant Cloud."
+        "semantic documents, generates vector embeddings, and idempotently upserts them into "
+        "Supabase PostgreSQL using the pgvector extension."
     ),
 )
 def index_repository_vectors(
@@ -82,12 +78,6 @@ def index_repository_vectors(
     except SupabaseConfigurationError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except SupabaseDatabaseError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
-    except QdrantConfigurationError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except QdrantConnectionError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
-    except QdrantOperationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except EmbeddingError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
@@ -103,8 +93,8 @@ def index_repository_vectors(
     response_model=SearchResponse,
     summary="Semantic similarity search across indexed repository documents",
     description=(
-        "Converts the search query into a dense vector embedding and queries Qdrant Cloud "
-        "for the most semantically relevant documents."
+        "Converts the search query into a dense vector embedding and queries Supabase PostgreSQL "
+        "using pgvector cosine similarity retrieval."
     ),
 )
 def search_vectors(
@@ -124,11 +114,9 @@ def search_vectors(
         indexer = VectorIndexer()
         result = indexer.search(query=q, repository=repository, limit=limit)
         return result
-    except QdrantConfigurationError as e:
+    except SupabaseConfigurationError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    except QdrantConnectionError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
-    except QdrantOperationError as e:
+    except SupabaseDatabaseError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except EmbeddingError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)

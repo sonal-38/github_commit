@@ -10,14 +10,14 @@ Produces human-readable, domain-rich context documents for:
 - Issue Comments (discussion text, commenter, issue)
 - Changed Files (filename, status, additions/deletions, patch preview)
 
-Generates deterministic UUIDs for Qdrant point upserts to ensure idempotency.
+Generates deterministic stable keys for PostgreSQL pgvector upserts to ensure idempotency.
 """
 import uuid
 from typing import Any, Dict, List, Optional
 
 
 class DocumentItem:
-    """Represents a prepared document ready for embedding and Qdrant ingestion."""
+    """Represents a prepared document ready for embedding and pgvector storage."""
     def __init__(
         self,
         point_id: str,
@@ -29,7 +29,7 @@ class DocumentItem:
         text: str,
         metadata: Optional[Dict[str, Any]] = None,
     ):
-        self.point_id = point_id          # Valid UUID string for Qdrant
+        self.point_id = point_id          # UUID string
         self.stable_key = stable_key      # Human-readable deterministic string (e.g. commit:repo:sha)
         self.document_type = document_type
         self.repository = repository
@@ -39,7 +39,7 @@ class DocumentItem:
         self.metadata = metadata or {}
 
     def to_payload(self) -> Dict[str, Any]:
-        """Returns the full metadata payload to store with the vector in Qdrant."""
+        """Returns the full metadata payload to store with the vector."""
         payload = {
             "document_type": self.document_type,
             "repository": self.repository,
@@ -61,7 +61,6 @@ class DocumentBuilder:
     def _create_deterministic_id(key: str) -> str:
         """
         Converts a deterministic string key into an RFC 4122 compliant UUIDv5.
-        Qdrant strictly requires point IDs to be unsigned 64-bit integers or UUIDs.
         """
         return str(uuid.uuid5(uuid.NAMESPACE_DNS, key))
 
