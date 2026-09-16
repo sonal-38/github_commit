@@ -114,14 +114,17 @@ class GeminiService:
             f"=== GROUNDED ANSWER ==="
         )
 
-        # For Google Gemini API (especially new AQ. authentication keys),
-        # ?key= on the URL query string is the universally verified working method.
+        # For Google Gemini API, ?key= on the URL query string is verified working.
+        # NOTE: Do NOT include 'x-goog-api-key' in headers when using ?key= with an AQ key,
+        # because Google's backend inspects x-goog-api-key, detects AQ., and rejects with ACCESS_TOKEN_TYPE_UNSUPPORTED!
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={api_key}"
         
         headers = {
             "Content-Type": "application/json",
-            "x-goog-api-key": api_key,
         }
+        # Only add x-goog-api-key if it is an older AIza key
+        if not api_key.startswith("AQ."):
+            headers["x-goog-api-key"] = api_key
         
         payload = {
             "system_instruction": {
