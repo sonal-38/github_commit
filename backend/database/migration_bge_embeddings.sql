@@ -1,46 +1,42 @@
 -- =====================================================================
--- Migration: Prepare document_embeddings for BAAI/bge-base-en-v1.5 (768-dim)
+-- Migration: Upgrade document_embeddings from 384-dim to 768-dim
 -- Run this in your Supabase SQL Editor (https://app.supabase.com/project/_/sql)
 -- =====================================================================
 
--- 1. Truncate existing vectors so old model embeddings are not mixed with BGE vectors
+-- 1. Drop existing match_documents function (which references vector(384))
+DROP FUNCTION IF EXISTS public.match_documents(vector(384), integer, text);
+DROP FUNCTION IF EXISTS public.match_documents(vector, integer, text);
+DROP FUNCTION IF EXISTS public.match_documents(vector(768), integer, text);
+
+-- 2. Drop the HNSW vector index first so the column type can be altered
+DROP INDEX IF EXISTS public.idx_document_embeddings_embedding;
+
+-- 3. Truncate existing 384-dimensional vectors
 TRUNCATE TABLE public.document_embeddings;
 
--- 2. Verify or ensure the embedding column is VECTOR(768)
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_schema = 'public' 
-          AND table_name = 'document_embeddings' 
-          AND column_name = 'embedding'
-    ) THEN
-        ALTER TABLE public.document_embeddings ADD COLUMN embedding VECTOR(768);
-    ELSE
-        ALTER TABLE public.document_embeddings ALTER COLUMN embedding TYPE VECTOR(768);
-    END IF;
-END $$;
+-- 4. Alter the embedding column type to VECTOR(768)
+ALTER TABLE public.document_embeddings 
+    ALTER COLUMN embedding TYPE vector(768);
 
--- 3. Recreate HNSW cosine distance index for 768 dimensions
-DROP INDEX IF EXISTS public.idx_document_embeddings_embedding;
+-- 5. Recreate HNSW cosine distance index for 768 dimensions
 CREATE INDEX IF NOT EXISTS idx_document_embeddings_embedding 
 ON public.document_embeddings USING hnsw (embedding vector_cosine_ops);
 
--- 4. Create or update match_documents function for 768-dimensional query embeddings
+-- 6. Create match_documents function accepting query_embedding VECTOR(768)
 CREATE OR REPLACE FUNCTION public.match_documents (
-    query_embedding VECTOR(768),
-    match_count INT DEFAULT 5,
-    filter_repository TEXT DEFAULT NULL
+    query_embedding vector(768),
+    match_count int DEFAULT 5,
+    filter_repository text DEFAULT NULL
 )
 RETURNS TABLE (
-    id TEXT,
-    repository TEXT,
-    document_type TEXT,
-    source_id TEXT,
-    developer TEXT,
-    text TEXT,
-    metadata JSONB,
-    similarity FLOAT
+    id text,
+    repository text,
+    document_type text,
+    source_id text,
+    developer text,
+    text text,
+    metadata jsonb,
+    similarity float
 )
 LANGUAGE plpgsql
 AS $$
