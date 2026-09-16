@@ -114,10 +114,9 @@ class GeminiService:
             f"=== GROUNDED ANSWER ==="
         )
 
-        # Google official Gemini API documentation:
-        # Gemini API requests accept API keys via x-goog-api-key or ?key=.
-        # For new Google AI Studio Authentication Keys (AQ.), try x-goog-api-key, ?key=, and Authorization: Bearer
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
+        # For Google Gemini API (especially new AQ. authentication keys),
+        # ?key= on the URL query string is the universally verified working method.
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={api_key}"
         
         headers = {
             "Content-Type": "application/json",
