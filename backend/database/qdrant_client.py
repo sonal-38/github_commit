@@ -45,12 +45,32 @@ class QdrantDatabaseClient:
         api_key: Optional[str] = None,
         collection_name: Optional[str] = None,
     ):
-        self.url = (url or os.getenv("QDRANT_URL", "")).strip()
-        self.api_key = (api_key or os.getenv("QDRANT_API_KEY", "")).strip()
+        raw_url = (url or os.getenv("QDRANT_URL", "")).strip()
+        # Clean quotes, whitespace, and invisible unicode artifacts
+        raw_url = raw_url.strip("\"' \t\r\n\u200b\ufeff").rstrip("/")
+
+        # Add https:// if user pasted without scheme
+        if raw_url and not (raw_url.startswith("https://") or raw_url.startswith("http://")):
+            raw_url = f"https://{raw_url}"
+
+        # If user inadvertently pasted the Qdrant Cloud web dashboard URL
+        if "cloud.qdrant.io" in raw_url and not any(ext in raw_url for ext in [".gcp.", ".aws.", ".azure."]):
+            if "cloud.qdrant.io/clusters" in raw_url or raw_url.rstrip("/") in [
+                "https://cloud.qdrant.io",
+                "http://cloud.qdrant.io",
+            ]:
+                raise QdrantConfigurationError(
+                    "Invalid QDRANT_URL: You entered the Qdrant Cloud Web Dashboard URL. "
+                    "Please use your cluster endpoint instead, which looks like: "
+                    "https://<your-cluster-id>.<region>.gcp.cloud.qdrant.io:6333"
+                )
+
+        self.url = raw_url
+        self.api_key = (api_key or os.getenv("QDRANT_API_KEY", "")).strip().strip("\"' \t\r\n\u200b\ufeff")
         self.collection_name = (
             collection_name
             or os.getenv("QDRANT_COLLECTION_NAME", "digital_shadow")
-        ).strip()
+        ).strip().strip("\"' \t\r\n")
 
         if not self.url:
             raise QdrantConfigurationError(
@@ -73,7 +93,9 @@ class QdrantDatabaseClient:
                 self._client = QdrantClient(
                     url=self.url,
                     api_key=self.api_key,
-                    timeout=20,
+                    timeout=25,
+                    check_compatibility=False,
+                    prefer_grpc=False,
                 )
             except ImportError:
                 raise QdrantConfigurationError(
@@ -96,8 +118,22 @@ class QdrantDatabaseClient:
         except QdrantConfigurationError:
             raise
         except Exception as e:
+            err_str = str(e)
+            if "401" in err_str or "Forbidden" in err_str or "Unauthorized" in err_str:
+                raise QdrantConnectionError(
+                    "Qdrant Cloud authentication failed (401 Unauthorized): "
+                    "Please check that QDRANT_API_KEY in backend/.env is correct and has not expired.",
+                    status_code=401,
+                )
+            if "getaddrinfo failed" in err_str or "NameResolutionError" in err_str or "ConnectError" in err_str:
+                raise QdrantConnectionError(
+                    f"Could not reach Qdrant Cloud host at '{self.url}'. "
+                    "Please check your cluster URL and internet connection. Details: " + err_str,
+                    status_code=503,
+                )
             raise QdrantConnectionError(
-                f"Failed to connect to Qdrant Cloud. Please verify QDRANT_URL and QDRANT_API_KEY. Error: {str(e)}"
+                f"Failed to connect to Qdrant Cloud at '{self.url}'. Details: {err_str}",
+                status_code=503,
             )
 
     def ensure_collection(self, vector_dimension: int) -> bool:
