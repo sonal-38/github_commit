@@ -9,6 +9,14 @@ import os
 import logging
 from typing import Optional
 
+try:
+    from dotenv import load_dotenv
+    # Ensure environment variables from backend/.env or root .env are loaded
+    load_dotenv()
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +49,10 @@ class GeminiService:
 
     def _get_client(self):
         """Lazy initialization of the official Google GenAI client."""
+        if not self.api_key:
+            raw_key = os.getenv("GEMINI_API_KEY", "")
+            self.api_key = raw_key.strip().strip("\"' \t\r\n\u200b\ufeff")
+
         if not self.api_key:
             raise GeminiConfigurationError(
                 "Gemini configuration missing: GEMINI_API_KEY is not set in backend/.env. "
@@ -123,8 +135,12 @@ class GeminiService:
                 raise GeminiAPIError("Gemini returned an empty response.")
             except Exception as e:
                 err_msg = str(e)
-                if "API_KEY" in err_msg or "401" in err_msg or "unauthenticated" in err_msg.lower():
-                    raise GeminiConfigurationError("Gemini API authentication failed. Check your GEMINI_API_KEY.")
+                if "API_KEY" in err_msg or "401" in err_msg or "unauthenticated" in err_msg.lower() or "PERMISSION_DENIED" in err_msg or "API_KEY_INVALID" in err_msg:
+                    raise GeminiConfigurationError(
+                        f"Gemini API authentication failed ({err_msg}). "
+                        "Please verify your GEMINI_API_KEY in backend/.env or your environment variables, "
+                        "and ensure the Gemini API is enabled for your Google Cloud / Google AI Studio project."
+                    )
                 raise GeminiAPIError(f"Gemini generation error: {err_msg}")
 
         # Path 2: Legacy google.generativeai SDK
