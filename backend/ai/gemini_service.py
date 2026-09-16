@@ -1,13 +1,14 @@
 """
 Gemini Service for AI Digital Shadow.
 
-Handles communication with the Google Gemini API using google-genai SDK
-or standard Google AI REST endpoints as fallback.
-Provides strictly grounded generation, prompt composition, and error handling.
+Handles communication with the Google Gemini API directly using standard REST endpoints
+with the 'x-goog-api-key' authentication header.
+Provides strictly grounded generation, prompt composition, and robust error handling.
 """
 import os
 import logging
 from typing import Optional
+import requests
 
 try:
     from dotenv import load_dotenv
@@ -32,7 +33,8 @@ class GeminiAPIError(Exception):
 
 class GeminiService:
     """
-    Manages Gemini LLM invocations with API key safety and error abstraction.
+    Manages Gemini LLM invocations via direct Google AI REST API calls
+    using x-goog-api-key authentication with API key safety and error abstraction.
     """
 
     DEFAULT_MODEL = "gemini-3.6-flash"
@@ -45,10 +47,9 @@ class GeminiService:
         raw_key = api_key or os.getenv("GEMINI_API_KEY", "")
         self.api_key = raw_key.strip().strip("\"' \t\r\n\u200b\ufeff")
         self.model_name = model_name or os.getenv("GEMINI_MODEL", self.DEFAULT_MODEL)
-        self._client = None
 
-    def _get_client(self):
-        """Lazy initialization of the official Google GenAI client."""
+    def _ensure_api_key(self) -> str:
+        """Validates that a Gemini API key is configured."""
         if not self.api_key:
             raw_key = os.getenv("GEMINI_API_KEY", "")
             self.api_key = raw_key.strip().strip("\"' \t\r\n\u200b\ufeff")
@@ -58,30 +59,7 @@ class GeminiService:
                 "Gemini configuration missing: GEMINI_API_KEY is not set in backend/.env. "
                 "Please add GEMINI_API_KEY=your_key_here to backend/.env."
             )
-
-        if self._client is None:
-            # Check if key is set in environment or object
-            api_key = self.api_key
-            # Clean possible quote wrappers or whitespace
-            api_key = api_key.strip().strip("\"' \t\r\n\u200b\ufeff")
-
-            try:
-                from google import genai
-                # The google-genai SDK uses api_key=... for AI Studio developer API keys
-                self._client = genai.Client(api_key=api_key)
-            except ImportError:
-                # If google-genai is not installed, fall back to google.generativeai or REST
-                try:
-                    import google.generativeai as legacy_genai
-                    legacy_genai.configure(api_key=api_key)
-                    self._client = legacy_genai.GenerativeModel(self.model_name)
-                    self._is_legacy = True
-                    return self._client
-                except ImportError:
-                    pass
-                self._client = "REST_FALLBACK"
-
-        return self._client
+        return self.api_key
 
     def generate_grounded_answer(
         self,
@@ -90,13 +68,16 @@ class GeminiService:
         system_instruction: Optional[str] = None,
     ) -> str:
         """
-        Generates a strictly grounded answer based ONLY on the provided context.
+        Generates a strictly grounded answer based ONLY on the provided context
+        using direct REST API calls with the x-goog-api-key header.
         """
         if not question or not question.strip():
             raise ValueError("Question cannot be empty.")
 
         if not context or not context.strip():
             return "I could not find enough repository evidence to answer this question."
+
+        api_key = self._ensure_api_key()
 
         default_system_prompt = (
             "You are an AI engineering knowledge assistant for a software codebase.\n"
@@ -122,75 +103,18 @@ class GeminiService:
             f"=== GROUNDED ANSWER ==="
         )
 
-        client = self._get_client()
-
-        # Path 1: Official google-genai SDK
-        if hasattr(client, "models") and hasattr(client.models, "generate_content"):
-            try:
-                from google.genai import types
-                response = client.models.generate_content(
-                    model=self.model_name,
-                    contents=full_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_prompt,
-                        temperature=0.2,  # Low temperature for factuality & groundness
-                    ),
-                )
-                if response and hasattr(response, "text") and response.text:
-                    return response.text.strip()
-                raise GeminiAPIError("Gemini returned an empty response.")
-            except (GeminiConfigurationError, GeminiAPIError):
-                raise
-            except Exception as e:
-                err_msg = str(e)
-                if "API_KEY" in err_msg or "401" in err_msg or "unauthenticated" in err_msg.lower() or "PERMISSION_DENIED" in err_msg or "API_KEY_INVALID" in err_msg:
-                    raise GeminiConfigurationError(
-                        f"Gemini API authentication failed ({err_msg}). "
-                        "Please verify your GEMINI_API_KEY in backend/.env or your environment variables, "
-                        "and ensure the Gemini API is enabled for your Google Cloud / Google AI Studio project."
-                    )
-                # Try REST fallback if SDK invocation encountered an unexpected client error
-                try:
-                    logger.info("Retrying Gemini request via REST API fallback...")
-                    return self._generate_via_rest(sys_prompt, full_prompt)
-                except Exception as rest_e:
-                    raise GeminiAPIError(f"Gemini generation error: {err_msg} (REST fallback also failed: {str(rest_e)})")
-
-        # Path 2: Legacy google.generativeai SDK
-        if getattr(self, "_is_legacy", False):
-            try:
-                combined_prompt = f"{sys_prompt}\n\n{full_prompt}"
-                response = client.generate_content(
-                    combined_prompt,
-                    generation_config={"temperature": 0.2},
-                )
-                if response and hasattr(response, "text") and response.text:
-                    return response.text.strip()
-                raise GeminiAPIError("Gemini returned an empty response.")
-            except Exception as e:
-                err_msg = str(e)
-                if "API_KEY" in err_msg or "401" in err_msg:
-                    raise GeminiConfigurationError("Gemini API authentication failed. Check your GEMINI_API_KEY.")
-                raise GeminiAPIError(f"Gemini generation error: {err_msg}")
-
-        # Path 3: Direct HTTP REST fallback (zero extra third-party SDK dependencies required)
-        return self._generate_via_rest(sys_prompt, full_prompt)
-
-    def _generate_via_rest(self, system_instruction: str, prompt_text: str) -> str:
-        """
-        Fallback REST caller directly to Google Gemini API endpoint via requests.
-        Ensures the service operates even if google-genai library installation is pending.
-        """
-        import requests
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        }
         payload = {
             "system_instruction": {
-                "parts": [{"text": system_instruction}]
+                "parts": [{"text": sys_prompt}]
             },
             "contents": [
                 {
-                    "parts": [{"text": prompt_text}]
+                    "parts": [{"text": full_prompt}]
                 }
             ],
             "generationConfig": {
@@ -199,26 +123,79 @@ class GeminiService:
         }
 
         try:
-            resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        except requests.exceptions.Timeout:
+            raise GeminiAPIError("Request to Gemini API timed out after 30 seconds.")
+        except requests.exceptions.ConnectionError as e:
+            raise GeminiAPIError(f"Failed to connect to Gemini API: {str(e)}")
         except requests.exceptions.RequestException as e:
             raise GeminiAPIError(f"Network error communicating with Gemini API: {str(e)}")
 
-        if resp.status_code == 400 and "API_KEY_INVALID" in resp.text:
-            raise GeminiConfigurationError("Invalid GEMINI_API_KEY provided in backend/.env.")
-        elif resp.status_code == 403:
-            raise GeminiConfigurationError("Gemini API access denied. Check your GEMINI_API_KEY permissions.")
-        elif resp.status_code != 200:
-            raise GeminiAPIError(f"Gemini API returned HTTP {resp.status_code}: {resp.text}")
+        # Handle specific HTTP status codes without exposing API key
+        if resp.status_code == 400:
+            resp_text = resp.text
+            if "API_KEY_INVALID" in resp_text or "INVALID_ARGUMENT" in resp_text and "key" in resp_text.lower():
+                raise GeminiConfigurationError("Invalid GEMINI_API_KEY provided in backend/.env.")
+            raise GeminiAPIError(f"Gemini API returned HTTP 400 (Bad Request): {resp_text}")
 
+        elif resp.status_code == 401:
+            raise GeminiConfigurationError(
+                "Gemini API authentication failed (HTTP 401 Unauthorized). "
+                "Please verify your GEMINI_API_KEY in backend/.env."
+            )
+
+        elif resp.status_code == 403:
+            raise GeminiConfigurationError(
+                "Gemini API access denied (HTTP 403 Forbidden). "
+                "Please check your GEMINI_API_KEY permissions and ensure the Generative Language API is enabled."
+            )
+
+        elif resp.status_code == 429:
+            raise GeminiAPIError(
+                "Gemini API rate limit exceeded (HTTP 429 Too Many Requests). "
+                "Please wait a moment before retrying."
+            )
+
+        elif resp.status_code >= 500:
+            raise GeminiAPIError(
+                f"Gemini API server error (HTTP {resp.status_code}). Please try again later."
+            )
+
+        elif resp.status_code != 200:
+            raise GeminiAPIError(
+                f"Gemini API returned unexpected HTTP status {resp.status_code}: {resp.text}"
+            )
+
+        # Parse JSON response
         try:
             data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise GeminiAPIError("Gemini API returned no response candidates.")
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", [])
-            if not parts:
-                raise GeminiAPIError("Gemini API candidate has no text parts.")
-            return parts[0].get("text", "").strip()
-        except (ValueError, KeyError, IndexError) as e:
-            raise GeminiAPIError(f"Failed to parse Gemini API response: {str(e)}")
+        except ValueError as e:
+            raise GeminiAPIError(f"Failed to parse Gemini API JSON response: {str(e)}")
+
+        # Check prompt feedback (blocked prompt, safety ratings, etc.)
+        prompt_feedback = data.get("promptFeedback", {})
+        block_reason = prompt_feedback.get("blockReason")
+        if block_reason:
+            raise GeminiAPIError(f"Gemini request was blocked by safety filters (reason: {block_reason}).")
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise GeminiAPIError("Gemini API returned no response candidates.")
+
+        first_candidate = candidates[0]
+        finish_reason = first_candidate.get("finishReason")
+        if finish_reason and finish_reason not in ("STOP", "MAX_TOKENS"):
+            logger.warning("Gemini candidate finishReason: %s", finish_reason)
+
+        content = first_candidate.get("content", {})
+        parts = content.get("parts", [])
+        if not parts:
+            raise GeminiAPIError("Gemini API candidate response contained no text parts.")
+
+        text_parts = [p.get("text", "") for p in parts if "text" in p]
+        answer_text = "".join(text_parts).strip()
+
+        if not answer_text:
+            raise GeminiAPIError("Gemini API candidate text was empty.")
+
+        return answer_text
