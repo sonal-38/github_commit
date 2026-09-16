@@ -6,6 +6,7 @@ load_dotenv()
 
 from api.github import router as github_router
 from api.graph import router as graph_router
+from api.vector import router as vector_router
 
 app = FastAPI(
     title="AI Digital Shadow - Backend API",
@@ -16,6 +17,7 @@ app = FastAPI(
 # Register routers
 app.include_router(github_router)
 app.include_router(graph_router)
+app.include_router(vector_router)
 
 
 @app.get("/")
@@ -36,6 +38,8 @@ def read_root():
             "pr_files": "/github/repositories/{owner}/{repo}/pull-requests/{pull_number}/files",
             "ingest": "/github/repositories/{owner}/{repo}/ingest",
             "graph_build": "/graph/repositories/{owner}/{repo}/build",
-            "graph_summary": "/graph/repositories/{owner}/{repo}/summary"
+            "graph_summary": "/graph/repositories/{owner}/{repo}/summary",
+            "vector_index": "/vector/repositories/{owner}/{repo}/index",
+            "vector_search": "/vector/search"
         }
     }
