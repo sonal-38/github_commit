@@ -269,7 +269,16 @@ class VectorIndexer:
         if repository and repository.strip():
             rpc_params["filter_repository"] = repository.strip()
 
-        matches = self.supabase.rpc("match_documents", rpc_params)
+        try:
+            matches = self.supabase.rpc("match_documents", rpc_params)
+        except SupabaseDatabaseError as e:
+            logger.warning("Supabase match_documents RPC error: %s", str(e))
+            # If match_documents function doesn't exist or table is empty, return empty results
+            # so RAG can fall back gracefully to repository records or return helpful guidance
+            return {"query": clean_query, "results": []}
+        except Exception as e:
+            logger.warning("Unexpected error during semantic vector search: %s", str(e))
+            return {"query": clean_query, "results": []}
 
         # 3. Format results to preserve API schema
         results = []

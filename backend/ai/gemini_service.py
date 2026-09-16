@@ -139,6 +139,8 @@ class GeminiService:
                 if response and hasattr(response, "text") and response.text:
                     return response.text.strip()
                 raise GeminiAPIError("Gemini returned an empty response.")
+            except (GeminiConfigurationError, GeminiAPIError):
+                raise
             except Exception as e:
                 err_msg = str(e)
                 if "API_KEY" in err_msg or "401" in err_msg or "unauthenticated" in err_msg.lower() or "PERMISSION_DENIED" in err_msg or "API_KEY_INVALID" in err_msg:
@@ -147,7 +149,12 @@ class GeminiService:
                         "Please verify your GEMINI_API_KEY in backend/.env or your environment variables, "
                         "and ensure the Gemini API is enabled for your Google Cloud / Google AI Studio project."
                     )
-                raise GeminiAPIError(f"Gemini generation error: {err_msg}")
+                # Try REST fallback if SDK invocation encountered an unexpected client error
+                try:
+                    logger.info("Retrying Gemini request via REST API fallback...")
+                    return self._generate_via_rest(sys_prompt, full_prompt)
+                except Exception as rest_e:
+                    raise GeminiAPIError(f"Gemini generation error: {err_msg} (REST fallback also failed: {str(rest_e)})")
 
         # Path 2: Legacy google.generativeai SDK
         if getattr(self, "_is_legacy", False):
