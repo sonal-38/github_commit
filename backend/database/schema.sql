@@ -174,7 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_changed_files_pull_request_id ON public.changed_f
 -- Enable the pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- Table for storing semantic text embeddings (Gemini gemini-embedding-001, 768 dimensions)
+-- Table for storing semantic text embeddings (BAAI/bge-base-en-v1.5, 768 dimensions)
 CREATE TABLE IF NOT EXISTS public.document_embeddings (
     id TEXT PRIMARY KEY,
     repository TEXT NOT NULL,

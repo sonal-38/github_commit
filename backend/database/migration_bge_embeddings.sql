@@ -1,27 +1,32 @@
 -- =====================================================================
--- Migration: Upgrade document_embeddings to Gemini Embeddings (768-dim)
+-- Migration: Prepare document_embeddings for BAAI/bge-base-en-v1.5 (768-dim)
 -- Run this in your Supabase SQL Editor (https://app.supabase.com/project/_/sql)
 -- =====================================================================
 
--- 1. Drop existing match_documents function that depends on VECTOR(384)
-DROP FUNCTION IF EXISTS public.match_documents(VECTOR(384), INT, TEXT);
-DROP FUNCTION IF EXISTS public.match_documents(VECTOR, INT, TEXT);
-
--- 2. Clear old 384-dimensional vectors so they are not mixed with new embeddings
+-- 1. Truncate existing vectors so old model embeddings are not mixed with BGE vectors
 TRUNCATE TABLE public.document_embeddings;
 
--- 3. Drop old index
+-- 2. Verify or ensure the embedding column is VECTOR(768)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'document_embeddings' 
+          AND column_name = 'embedding'
+    ) THEN
+        ALTER TABLE public.document_embeddings ADD COLUMN embedding VECTOR(768);
+    ELSE
+        ALTER TABLE public.document_embeddings ALTER COLUMN embedding TYPE VECTOR(768);
+    END IF;
+END $$;
+
+-- 3. Recreate HNSW cosine distance index for 768 dimensions
 DROP INDEX IF EXISTS public.idx_document_embeddings_embedding;
-
--- 4. Alter column dimension to 768 (standard output dimension of gemini-embedding-001)
-ALTER TABLE public.document_embeddings 
-    ALTER COLUMN embedding TYPE VECTOR(768);
-
--- 5. Recreate HNSW cosine distance index for 768 dimensions
 CREATE INDEX IF NOT EXISTS idx_document_embeddings_embedding 
 ON public.document_embeddings USING hnsw (embedding vector_cosine_ops);
 
--- 6. Create new match_documents function for 768-dimensional query embeddings
+-- 4. Create or update match_documents function for 768-dimensional query embeddings
 CREATE OR REPLACE FUNCTION public.match_documents (
     query_embedding VECTOR(768),
     match_count INT DEFAULT 5,

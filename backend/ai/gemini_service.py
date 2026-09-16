@@ -35,7 +35,7 @@ class GeminiService:
     Manages Gemini LLM invocations with API key safety and error abstraction.
     """
 
-    DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = "gemini-3.6-flash"
 
     def __init__(
         self,
