@@ -9,6 +9,8 @@ Endpoints:
 """
 from typing import Any, Dict, List, Optional
 import logging
+import sys
+import traceback
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -80,17 +82,38 @@ def ask_question(request: AskRequest) -> AskResponse:
         return AskResponse(**response_dict)
 
     except ValueError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] ValueError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=400, detail=str(e))
     except GeminiConfigurationError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] GeminiConfigurationError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=500, detail=str(e))
     except GeminiAPIError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] GeminiAPIError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=502, detail=f"Gemini AI Service Error: {str(e)}")
     except SupabaseConfigurationError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] SupabaseConfigurationError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=500, detail=str(e))
     except SupabaseDatabaseError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] SupabaseDatabaseError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except EmbeddingError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] EmbeddingError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=500, detail=f"Embedding Error: {str(e)}")
     except Exception as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] Unexpected Exception caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         logger.exception("Unexpected error in /ai/ask endpoint: %s", str(e))
         raise HTTPException(status_code=500, detail=f"Internal RAG pipeline error: {str(e)}")
