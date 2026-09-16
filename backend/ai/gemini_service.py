@@ -103,7 +103,9 @@ class GeminiService:
             f"=== GROUNDED ANSWER ==="
         )
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
+        # Google AI REST API accepts API key via x-goog-api-key header or ?key= query parameter.
+        # Sending both ensures compatibility regardless of proxy or gateway configuration.
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={api_key}"
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key,
@@ -139,9 +141,11 @@ class GeminiService:
             raise GeminiAPIError(f"Gemini API returned HTTP 400 (Bad Request): {resp_text}")
 
         elif resp.status_code == 401:
+            logger.error("Gemini 401 response: %s", resp.text)
             raise GeminiConfigurationError(
-                "Gemini API authentication failed (HTTP 401 Unauthorized). "
-                "Please verify your GEMINI_API_KEY in backend/.env."
+                f"Gemini API authentication failed (HTTP 401 Unauthorized): {resp.text}. "
+                f"Key length: {len(api_key)}, Key prefix: {api_key[:4] if len(api_key)>=4 else 'short'}... "
+                "Please check your GEMINI_API_KEY in backend/.env."
             )
 
         elif resp.status_code == 403:
