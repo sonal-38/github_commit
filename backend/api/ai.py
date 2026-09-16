@@ -32,6 +32,7 @@ class SourceItem(BaseModel):
     document_type: str = Field(..., description="Type of evidence document (commit, pull_request, issue, etc.)")
     source_id: str = Field(..., description="Unique source identifier (commit SHA, PR #, issue #, file path)")
     developer: Optional[str] = Field(None, description="Author or developer responsible")
+    date: Optional[str] = Field(None, description="Original GitHub event timestamp")
 
 
 class FilterMetadata(BaseModel):

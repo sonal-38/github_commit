@@ -161,17 +161,33 @@ class RAGService:
         repo_id: Optional[int] = None
         repo_full_name: str = repository or ""
 
+        # Fetch all available repositories for mapping and fallback
+        all_repos = self._safe_select("repositories", None)
+        repo_map: Dict[int, str] = {r["id"]: r.get("full_name", "") for r in all_repos if "id" in r}
+
         if repository:
-            repo_records = self._safe_select("repositories", [("full_name", f"eq.{repository}")])
+            repo_records = [r for r in all_repos if r.get("full_name") == repository]
             if not repo_records and "/" in repository:
                 owner, rname = repository.split("/", 1)
-                repo_records = self._safe_select("repositories", [
-                    ("name", f"eq.{rname}"),
-                    ("owner_login", f"eq.{owner}")
-                ])
+                repo_records = [
+                    r for r in all_repos
+                    if r.get("name") == rname and r.get("owner_login") == owner
+                ]
+            if not repo_records:
+                # Case-insensitive or partial match
+                repo_lower = repository.lower()
+                repo_records = [
+                    r for r in all_repos
+                    if (r.get("full_name") or "").lower() == repo_lower
+                    or (r.get("name") or "").lower() == repo_lower
+                ]
+
             if repo_records:
                 repo_id = repo_records[0].get("id")
                 repo_full_name = repo_records[0].get("full_name") or repository
+        elif len(all_repos) == 1:
+            # If no repository was explicitly given in the request, and exactly 1 repository exists, use it
+            repo_full_name = all_repos[0].get("full_name", "")
 
         # Fetch developers lookup map
         developers_list = self._safe_select("developers", None)
@@ -179,6 +195,10 @@ class RAGService:
 
         entities_to_query = [constraint.target_entity] if constraint.target_entity else ["commits", "pull_requests", "issues"]
         all_matches: List[Dict[str, Any]] = []
+
+        # Parse comparison boundaries
+        start_dt = self._parse_iso_datetime(constraint.start_iso)
+        end_dt = self._parse_iso_datetime(constraint.end_iso)
 
         for entity in entities_to_query:
             table_name = entity
@@ -192,7 +212,6 @@ class RAGService:
 
             # Apply PostgREST comparison operators
             if constraint.start_iso and constraint.end_iso:
-                # Query lower bound and upper bound
                 query_param_list.append((date_col, f"gte.{constraint.start_iso}"))
                 query_param_list.append((date_col, f"lt.{constraint.end_iso}"))
             elif constraint.start_iso:
@@ -202,31 +221,65 @@ class RAGService:
 
             # Fetch records from Supabase structured table
             records = self._safe_select(table_name, query_param_list)
+            logger.info(
+                "Exact date query for table '%s': params=%s, returned %d raw records",
+                table_name,
+                query_param_list,
+                len(records),
+            )
+
+            # If PostgREST returns empty, retry without the date filter in case Supabase format differs
+            # and do precise Python datetime filtering
+            if not records and (constraint.start_iso or constraint.end_iso):
+                fallback_params: List[tuple] = []
+                if repo_id is not None:
+                    fallback_params.append(("repository_id", f"eq.{repo_id}"))
+                unfiltered_records = self._safe_select(table_name, fallback_params if fallback_params else None)
+                records = unfiltered_records
+                logger.info(
+                    "Fallback query for table '%s' fetched %d records before Python date filtering",
+                    table_name,
+                    len(records),
+                )
 
             # Python-side boundary check to ensure UTC precision
             filtered_records = []
             for rec in records:
-                rec_date = rec.get(date_col)
-                if not rec_date:
+                rec_date_str = rec.get(date_col)
+                if not rec_date_str:
                     continue
-                if constraint.start_iso and rec_date < constraint.start_iso:
+                rec_dt = self._parse_iso_datetime(rec_date_str)
+                if not rec_dt:
                     continue
-                if constraint.end_iso and rec_date >= constraint.end_iso:
+
+                if start_dt and rec_dt < start_dt:
+                    continue
+                if end_dt and rec_dt >= end_dt:
                     continue
                 filtered_records.append(rec)
 
+            logger.info(
+                "Exact date query for table '%s': %d records matched date range [%s, %s]",
+                table_name,
+                len(filtered_records),
+                constraint.start_iso,
+                constraint.end_iso,
+            )
+
             # Sort chronologically by original GitHub event date
             filtered_records.sort(
-                key=lambda r: r.get(date_col) or "",
+                key=lambda r: str(r.get(date_col) or ""),
                 reverse=bool(constraint.relative_keyword == "recent")
             )
 
             # Convert to DocumentItem representation
             for rec in filtered_records[:limit]:
+                row_repo_id = rec.get("repository_id")
+                effective_repo_name = repo_map.get(row_repo_id) or repo_full_name or "repository"
                 doc_item = self._convert_record_to_doc(
                     entity=table_name,
                     record=rec,
-                    repo_name=repo_full_name,
+                    repo_name=effective_repo_name,
                     dev_map=dev_map,
                     date_field=date_col,
                 )
@@ -280,7 +333,7 @@ class RAGService:
         event_date = record.get(date_field) or ""
 
         if entity == "commits":
-            doc = DocumentBuilder.build_commit_document(record, repo_name, dev_map)
+            doc = DocumentBuilder.build_commit_doc(record, repo_name, dev_map)
             if doc:
                 meta = doc.metadata
                 meta["github_event_date"] = event_date
@@ -379,6 +432,29 @@ class RAGService:
         }
         return mapping.get(table)
 
+    @staticmethod
+    def _parse_iso_datetime(date_val: Optional[str]) -> Optional[datetime]:
+        """Parses various ISO 8601 and PostgreSQL timestamp formats into a UTC datetime object."""
+        if not date_val:
+            return None
+        s = str(date_val).strip()
+        # Handle 'Z' suffix
+        s = s.replace("Z", "+00:00")
+        # Handle Postgres 'YYYY-MM-DD HH:MM:SS+00'
+        if " " in s and "+" in s:
+            s = s.replace(" ", "T")
+        elif " " in s and len(s) == 19:
+            s = s.replace(" ", "T") + "+00:00"
+        if s.endswith("+00"):
+            s = s + ":00"
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
     def _safe_select(
         self,
         table: str,
@@ -459,10 +535,21 @@ class RAGService:
 
             if key not in seen_keys:
                 seen_keys.add(key)
-                sources.append({
+                meta = doc.get("metadata", {})
+                event_date = (
+                    meta.get("github_event_date")
+                    or meta.get("committed_at")
+                    or meta.get("created_at")
+                    or meta.get("submitted_at")
+                    or None
+                )
+                source_item = {
                     "document_type": doc_type,
                     "source_id": source_id,
                     "developer": doc.get("developer") or "Unknown",
-                })
+                }
+                if event_date:
+                    source_item["date"] = event_date
+                sources.append(source_item)
 
         return sources
