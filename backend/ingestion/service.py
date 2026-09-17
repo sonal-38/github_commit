@@ -16,6 +16,7 @@ from ingestion.normalizer import (
     NormalizedIssue,
     NormalizedIssueComment,
     NormalizedChangedFile,
+    NormalizedCommitFile,
     IngestionCounts,
     IngestionSummaryResponse,
     normalize_repository,
@@ -26,6 +27,7 @@ from ingestion.normalizer import (
     normalize_issue,
     normalize_issue_comment,
     normalize_changed_file,
+    normalize_commit_file,
 )
 
 
@@ -77,6 +79,23 @@ class IngestionService:
             normalize_commit(commit, repo_full_name)
             for commit in raw_commits
         ]
+
+        # 2b. Fetch & Normalize Commit Files per Commit
+        normalized_commit_files = []
+        for commit in normalized_commits:
+            commit_sha = commit.sha
+            if not commit_sha:
+                continue
+            try:
+                commit_details = self.client.get_commit_details(owner=owner, repo=repo, sha=commit_sha)
+                raw_files = commit_details.get("files") or []
+                for file_item in raw_files:
+                    normalized_commit_files.append(
+                        normalize_commit_file(file_item, repo_full_name, commit_sha)
+                    )
+            except GitHubClientError:
+                # Gracefully continue if an individual commit detail fetch fails
+                pass
 
         # 3. Fetch & Normalize Pull Requests
         raw_prs = self.client.get_repository_pull_requests(owner=owner, repo=repo)
@@ -133,6 +152,7 @@ class IngestionService:
             issues=normalized_issues,
             issue_comments=normalized_issue_comments,
             changed_files=normalized_changed_files,
+            commit_files=normalized_commit_files,
         )
 
         # 8. Construct Summary Response with Stored Database Counts
@@ -146,6 +166,7 @@ class IngestionService:
             issues=stored_counts.get("issues", len(normalized_issues)),
             issue_comments=stored_counts.get("issue_comments", len(normalized_issue_comments)),
             changed_files=stored_counts.get("changed_files", len(normalized_changed_files)),
+            commit_files=stored_counts.get("commit_files", len(normalized_commit_files)),
         )
 
         return IngestionSummaryResponse(

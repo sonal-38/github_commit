@@ -1,7 +1,7 @@
 from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException
 from github.client import GitHubClient, GitHubClientError
-from schemas.commit import CommitHistoryResponse
+from schemas.commit import CommitHistoryResponse, CommitDetailResponse
 from schemas.pull_request import PullRequestListResponse
 from schemas.review import (
     PullRequestReviewListResponse,
@@ -67,6 +67,46 @@ def get_repository_commits(owner: str, repo: str):
             repository=repo,
             total_commits=len(commits),
             commits=commits,
+        )
+    except GitHubClientError as err:
+        raise HTTPException(
+            status_code=err.status_code,
+            detail=err.message
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while communicating with GitHub"
+        )
+
+
+@router.get("/repositories/{owner}/{repo}/commits/{sha}", response_model=CommitDetailResponse)
+def get_repository_commit_detail(owner: str, repo: str, sha: str):
+    """
+    Retrieve details and changed files for a specific commit in a repository.
+
+    Args:
+        owner: GitHub username or organization (e.g., 'sonal-38')
+        repo: Repository name (e.g., 'smart-payment-platform')
+        sha: Commit SHA
+
+    Returns:
+        CommitDetailResponse containing commit metadata and changed files list.
+    """
+    client = GitHubClient()
+    try:
+        details = client.get_commit_details(owner=owner, repo=repo, sha=sha)
+        files = details.get("files", [])
+        return CommitDetailResponse(
+            sha=details.get("sha", sha),
+            repository=f"{owner}/{repo}",
+            message=details.get("message", ""),
+            author_name=details.get("author_name"),
+            author_email=details.get("author_email"),
+            date=details.get("date"),
+            url=details.get("url"),
+            total_files=len(files),
+            files=files,
         )
     except GitHubClientError as err:
         raise HTTPException(

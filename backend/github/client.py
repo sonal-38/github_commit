@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
@@ -17,9 +17,9 @@ class GitHubClient:
 
     BASE_URL = "https://api.github.com"
 
-    def __init__(self):
-        # Read the token from environment variables
-        self.token = os.getenv("GITHUB_TOKEN")
+    def __init__(self, token: Optional[str] = None):
+        # Read the token from argument or environment variables
+        self.token = token if token is not None else os.getenv("GITHUB_TOKEN")
 
     @staticmethod
     def _clean_owner_repo(owner: str, repo: str) -> tuple[str, str]:
@@ -755,5 +755,115 @@ class GitHubClient:
             page += 1
 
         return all_files
+
+    def get_commit_details(self, owner: str, repo: str, sha: str) -> Dict[str, Any]:
+        """
+        Fetch details for a specific commit, including its changed files with pagination.
+        Handles commits with many files by fetching subsequent pages of files.
+        """
+        owner, repo = self._clean_owner_repo(owner, repo)
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/commits/{sha}"
+        all_files: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+        commit_info: Dict[str, Any] = {
+            "sha": sha,
+            "message": "",
+            "author_name": None,
+            "author_email": None,
+            "date": None,
+            "url": None,
+        }
+
+        while True:
+            params = {
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError(
+                    f"Commit '{sha}' or repository '{owner}/{repo}' not found",
+                    status_code=404,
+                )
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                commit_payload = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(commit_payload, dict):
+                break
+
+            if page == 1:
+                raw_commit = commit_payload.get("commit") or {}
+                raw_author = raw_commit.get("author") or {}
+                commit_info = {
+                    "sha": commit_payload.get("sha") or sha,
+                    "message": raw_commit.get("message", ""),
+                    "author_name": raw_author.get("name"),
+                    "author_email": raw_author.get("email"),
+                    "date": raw_author.get("date"),
+                    "url": commit_payload.get("html_url"),
+                }
+
+            files_data = commit_payload.get("files") or []
+            if not isinstance(files_data, list) or len(files_data) == 0:
+                break
+
+            for item in files_data:
+                all_files.append({
+                    "filename": item.get("filename", ""),
+                    "status": item.get("status", "modified"),
+                    "additions": item.get("additions", 0) or 0,
+                    "deletions": item.get("deletions", 0) or 0,
+                    "changes": item.get("changes", 0) or 0,
+                    "blob_url": item.get("blob_url"),
+                    "raw_url": item.get("raw_url"),
+                    "contents_url": item.get("contents_url"),
+                    "sha": item.get("sha"),
+                    "patch": item.get("patch"),
+                })
+
+            if len(files_data) < per_page:
+                break
+
+            page += 1
+
+        commit_info["files"] = all_files
+        return commit_info
+
+    def get_commit_files(self, owner: str, repo: str, sha: str) -> List[Dict[str, Any]]:
+        """
+        Convenience method to retrieve only the list of changed files for a specific commit.
+        """
+        details = self.get_commit_details(owner=owner, repo=repo, sha=sha)
+        return details.get("files", [])
 
 

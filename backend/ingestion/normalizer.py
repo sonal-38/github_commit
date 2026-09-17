@@ -118,6 +118,20 @@ class NormalizedChangedFile(BaseModel):
     blob_url: Optional[str] = None
 
 
+class NormalizedCommitFile(BaseModel):
+    """Normalized commit file entity linking file diff to a specific commit and repository."""
+    repository: str
+    commit_sha: str
+    filename: str
+    status: Optional[str] = "modified"
+    additions: int = 0
+    deletions: int = 0
+    changes: int = 0
+    patch: Optional[str] = None
+    blob_url: Optional[str] = None
+    raw_url: Optional[str] = None
+
+
 # =====================================================================
 # 2. Ingestion Response Summaries
 # =====================================================================
@@ -133,6 +147,7 @@ class IngestionCounts(BaseModel):
     issues: int = 0
     issue_comments: int = 0
     changed_files: int = 0
+    commit_files: int = 0
 
 
 class IngestionSummaryResponse(BaseModel):
@@ -283,3 +298,20 @@ def normalize_changed_file(raw_file: Dict[str, Any], repo_full_name: str, pr_num
         patch=raw_file.get("patch"),
         blob_url=raw_file.get("blob_url"),
     )
+
+
+def normalize_commit_file(raw_file: Dict[str, Any], repo_full_name: str, commit_sha: str) -> NormalizedCommitFile:
+    """Normalize commit file data into NormalizedCommitFile."""
+    return NormalizedCommitFile(
+        repository=repo_full_name,
+        commit_sha=commit_sha,
+        filename=raw_file.get("filename", ""),
+        status=raw_file.get("status", "modified"),
+        additions=raw_file.get("additions", 0) or 0,
+        deletions=raw_file.get("deletions", 0) or 0,
+        changes=raw_file.get("changes", 0) or 0,
+        patch=raw_file.get("patch"),
+        blob_url=raw_file.get("blob_url"),
+        raw_url=raw_file.get("raw_url"),
+    )
+

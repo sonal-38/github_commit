@@ -24,6 +24,7 @@ from ingestion.normalizer import (
     NormalizedIssue,
     NormalizedIssueComment,
     NormalizedChangedFile,
+    NormalizedCommitFile,
 )
 from database.supabase_client import SupabaseClient, get_supabase_client, SupabaseDatabaseError
 
@@ -44,6 +45,7 @@ class SupabaseStorageService:
         issues: List[NormalizedIssue],
         issue_comments: List[NormalizedIssueComment],
         changed_files: List[NormalizedChangedFile],
+        commit_files: Optional[List[NormalizedCommitFile]] = None,
     ) -> Dict[str, int]:
         """
         Persist all normalized entities into Supabase following foreign-key order.
@@ -315,6 +317,36 @@ class SupabaseStorageService:
                 cf_res = self.client.upsert("changed_files", cf_payload, on_conflict="pull_request_id,filename")
                 stored_changed_files = len(cf_res) if cf_res else len(cf_payload)
 
+        # 10. Upsert Commit Files (linked to repository, commit_sha, and filename)
+        stored_commit_files = 0
+        if commit_files:
+            commit_files_payload = []
+            for cf in commit_files:
+                if not cf.filename or not cf.commit_sha:
+                    continue
+                commit_files_payload.append({
+                    "repository": repository.full_name,
+                    "commit_sha": cf.commit_sha,
+                    "filename": cf.filename,
+                    "status": cf.status,
+                    "additions": cf.additions,
+                    "deletions": cf.deletions,
+                    "changes": cf.changes,
+                    "patch": cf.patch,
+                    "blob_url": cf.blob_url,
+                    "raw_url": cf.raw_url,
+                })
+            if commit_files_payload:
+                chunk_size = 100
+                for i in range(0, len(commit_files_payload), chunk_size):
+                    chunk = commit_files_payload[i:i + chunk_size]
+                    cf_res = self.client.upsert(
+                        "commit_files",
+                        chunk,
+                        on_conflict="repository,commit_sha,filename",
+                    )
+                    stored_commit_files += len(cf_res) if cf_res else len(chunk)
+
         return {
             "repositories": 1,
             "developers": len(dev_id_map),
@@ -325,4 +357,5 @@ class SupabaseStorageService:
             "issues": stored_issues,
             "issue_comments": stored_issue_comments,
             "changed_files": stored_changed_files,
+            "commit_files": stored_commit_files,
         }
