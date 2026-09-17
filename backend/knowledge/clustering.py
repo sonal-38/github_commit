@@ -22,6 +22,7 @@ and does NOT modify Supabase tables, Neo4j, or RAG.
 """
 from dataclasses import dataclass, field
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
@@ -475,31 +476,78 @@ def load_knowledge_documents(
     for cf in changed_files:
         pr_files_map.setdefault(cf.get("pull_request_id"), []).append(cf)
 
-    # Fetch PR Commits using official GitHub endpoint GET /repos/{owner}/{repo}/pulls/{pull_number}/commits
+    # Build commit lookup map from Supabase commits
+    commit_map: Dict[str, Dict[str, Any]] = {c["sha"]: c for c in commits if "sha" in c}
+
+    def _format_supabase_commit_info(c_record: Dict[str, Any]) -> Dict[str, Any]:
+        c_dev = dev_map.get(c_record.get("developer_id"), {}) if c_record.get("developer_id") else {}
+        author_name = c_dev.get("login") or c_dev.get("name") or c_dev.get("github_login") or "Unknown"
+        return {
+            "sha": c_record.get("sha"),
+            "message": c_record.get("message") or "",
+            "author_login": author_name,
+            "author": author_name,
+            "date": c_record.get("committed_at") or "",
+            "committed_at": c_record.get("committed_at") or "",
+        }
+
+    # Fetch PR Commits strictly from Supabase records (pull_requests, reviews, review_comments, commits)
     pr_commits_cache: Dict[int, List[Dict[str, Any]]] = {}
     if pr_commits_map:
         pr_commits_cache.update(pr_commits_map)
 
-    # If github_client was provided or can be instantiated, fetch commits for PRs not already in cache
-    gh_client = github_client
-    if gh_client is None:
-        try:
-            from github.client import GitHubClient
-            gh_client = GitHubClient()
-        except Exception:
-            gh_client = None
-
+    # For PRs not pre-cached, resolve related commits directly from Supabase
     for p in prs:
         pr_num = p.get("github_pr_number") or p.get("number")
-        if pr_num and pr_num not in pr_commits_cache and gh_client is not None:
+        if not pr_num or pr_num in pr_commits_cache:
+            continue
+
+        pid = p.get("id")
+        candidate_shas: List[str] = []
+
+        # 1. Merge commit SHA recorded on pull_requests table
+        m_sha = p.get("merge_commit_sha")
+        if m_sha and m_sha in commit_map and m_sha not in candidate_shas:
+            candidate_shas.append(m_sha)
+
+        # 2. Reviews in Supabase linking to this PR
+        if pid:
             try:
-                pr_commits = gh_client.get_pull_request_commits(owner_clean, repo_clean, pr_num)
-                pr_commits_cache[pr_num] = pr_commits
-            except Exception as e:
-                logger.warning(
-                    f"Could not fetch commits for PR #{pr_num} from GitHub API ({full_name}): {e}"
-                )
-                pr_commits_cache[pr_num] = []
+                revs = sb.select("reviews", {"pull_request_id": f"eq.{pid}"})
+                for r in revs:
+                    c_id = r.get("commit_id")
+                    if c_id and c_id in commit_map and c_id not in candidate_shas:
+                        candidate_shas.append(c_id)
+            except Exception:
+                pass
+
+        # 3. Review comments in Supabase linking to this PR
+        if pid:
+            try:
+                rcs = sb.select("review_comments", {"pull_request_id": f"eq.{pid}"})
+                for rc in rcs:
+                    c_sha = rc.get("commit_sha")
+                    if c_sha and c_sha in commit_map and c_sha not in candidate_shas:
+                        candidate_shas.append(c_sha)
+            except Exception:
+                pass
+
+        # 4. Repository commits referencing this PR number in commit message
+        pr_pattern = re.compile(rf"(?:#|\bPR\s*#?){pr_num}\b", re.IGNORECASE)
+        for c in commits:
+            c_msg = c.get("message") or ""
+            c_sha = c.get("sha")
+            if c_sha and c_sha in commit_map and c_sha not in candidate_shas and pr_pattern.search(c_msg):
+                candidate_shas.append(c_sha)
+
+        # Format commit records from Supabase commits
+        resolved_commits = []
+        for c_sha in candidate_shas:
+            c_rec = commit_map.get(c_sha)
+            if c_rec:
+                resolved_commits.append(_format_supabase_commit_info(c_rec))
+
+        pr_commits_cache[pr_num] = resolved_commits
 
     # 3. Construct documents with strict deduplication
     documents: List[KnowledgeDocument] = []
@@ -518,7 +566,6 @@ def load_knowledge_documents(
         add_doc(doc)
 
     # B. CommitFiles
-    commit_map: Dict[str, Dict[str, Any]] = {c["sha"]: c for c in commits if "sha" in c}
     for cf in commit_files:
         parent_commit = commit_map.get(cf.get("commit_sha"), {})
         doc = format_commit_file_document(cf, resolved_full_name, parent_commit, dev_map)

@@ -252,32 +252,31 @@ class TestLoadKnowledgeDocuments(unittest.TestCase):
         self.assertEqual(len(doc_ids), len(set(doc_ids)))
 
     @patch("knowledge.clustering.get_supabase_client")
-    def test_load_knowledge_documents_with_github_pr_commits(self, mock_get_sb):
+    def test_load_knowledge_documents_with_supabase_pr_commits(self, mock_get_sb):
         mock_sb = MagicMock()
         mock_get_sb.return_value = mock_sb
         mock_sb.select.side_effect = lambda table, filters=None: {
             "repositories": [{"id": 10, "full_name": "sonal-38/smart_payment_platform", "name": "smart_payment_platform"}],
             "developers": [{"id": 1, "login": "sonal-38", "name": "Sonal"}],
             "commits": [
-                {"sha": "c1", "repository_id": 10, "developer_id": 1, "message": "commit 1", "committed_at": "2026-03-01T00:00:00Z"},
+                {"sha": "c1", "repository_id": 10, "developer_id": 1, "message": "commit 1 (#5)", "committed_at": "2026-03-01T00:00:00Z"},
             ],
             "commit_files": [],
             "pull_requests": [
-                {"id": 201, "github_pr_number": 5, "repository_id": 10, "developer_id": 1, "title": "PR 5", "created_at": "2026-03-01T02:00:00Z"},
+                {"id": 201, "github_pr_number": 5, "repository_id": 10, "developer_id": 1, "title": "PR 5", "merge_commit_sha": "c1", "created_at": "2026-03-01T02:00:00Z"},
             ],
             "changed_files": [],
+            "reviews": [],
+            "review_comments": [],
         }.get(table, [])
 
         mock_gh = MagicMock()
-        mock_gh.get_pull_request_commits.return_value = [
-            {"sha": "c1", "author_login": "amit", "message": "Sub-commit in PR", "date": "2026-03-01T01:00:00Z"}
-        ]
-
         docs = load_knowledge_documents("sonal-38", "smart_payment_platform", supabase_client=mock_sb, github_client=mock_gh)
         pr_doc = next(d for d in docs if d.document_type == "pull_request")
         self.assertEqual(pr_doc.contained_commit_ids, ["commit:c1"])
-        self.assertIn("Sub-commit in PR", pr_doc.text)
-        mock_gh.get_pull_request_commits.assert_called_once_with("sonal-38", "smart_payment_platform", 5)
+        self.assertIn("commit 1", pr_doc.text)
+        # Verify GitHub client was never called
+        mock_gh.get_pull_request_commits.assert_not_called()
 
 
 class TestBGEEmbeddingsValidation(unittest.TestCase):
