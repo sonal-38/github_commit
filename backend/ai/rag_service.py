@@ -13,7 +13,7 @@ Coordinates the end-to-end Retrieval-Augmented Generation pipeline:
 4. If no date constraint exists:
    - Uses pgvector semantic cosine similarity search.
 5. Builds clear, structured evidence context with explicit event timestamps and sources.
-6. Prompts Gemini to produce a strictly grounded answer with zero external hallucinations.
+6. Prompts OpenRouter to produce a strictly grounded answer with zero external hallucinations.
 7. Returns grounded answer, verified source citations, and date filters applied.
 """
 from datetime import datetime, timezone
@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from vector.indexer import VectorIndexer
 from vector.document_builder import DocumentBuilder
+from ai.openrouter_service import OpenRouterService, OpenRouterConfigurationError, OpenRouterAPIError
 from ai.gemini_service import GeminiService, GeminiConfigurationError, GeminiAPIError
 from ai.date_filter import DateQueryDetector, DateConstraint
 from database.supabase_client import SupabaseClient, SupabaseDatabaseError
@@ -32,19 +33,23 @@ logger = logging.getLogger(__name__)
 class RAGService:
     """
     Coordinates date-aware structured retrieval from Supabase, pgvector semantic search,
-    and Gemini grounded answer generation.
+    and OpenRouter grounded answer generation.
     """
 
     def __init__(
         self,
         vector_indexer: Optional[VectorIndexer] = None,
-        gemini_service: Optional[GeminiService] = None,
+        openrouter_service: Optional[OpenRouterService] = None,
         supabase_client: Optional[SupabaseClient] = None,
         default_top_k: int = 5,
         min_similarity_threshold: float = 0.25,
+        gemini_service: Optional[Any] = None,
+        llm_service: Optional[Any] = None,
     ):
         self.indexer = vector_indexer or VectorIndexer()
-        self.gemini = gemini_service or GeminiService()
+        # OpenRouter is the primary and active generation provider
+        self.openrouter = openrouter_service or llm_service or gemini_service or OpenRouterService()
+        self.gemini = self.openrouter  # Backward-compatible alias
         self.supabase = supabase_client or SupabaseClient()
         self.default_top_k = default_top_k
         self.min_similarity_threshold = min_similarity_threshold
@@ -119,11 +124,11 @@ class RAGService:
                 resp["filters"] = filter_metadata
             return resp
 
-        # 3. Build Structured Context for Gemini
+        # 3. Build Structured Context for OpenRouter
         context_str = self._build_context(relevant_docs, is_transition=bool(date_constraint and date_constraint.is_transition))
 
-        # 4. Generate Grounded Answer using Gemini
-        answer = self.gemini.generate_grounded_answer(
+        # 4. Generate Grounded Answer using OpenRouter
+        answer = self.openrouter.generate_grounded_answer(
             question=clean_question,
             context=context_str,
         )

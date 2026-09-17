@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ai.rag_service import RAGService
+from ai.openrouter_service import OpenRouterConfigurationError, OpenRouterAPIError
 from ai.gemini_service import GeminiConfigurationError, GeminiAPIError
 from database.supabase_client import SupabaseConfigurationError, SupabaseDatabaseError
 from vector.embeddings import EmbeddingError
@@ -59,12 +60,12 @@ class AskResponse(BaseModel):
 @router.post(
     "/ask",
     response_model=AskResponse,
-    summary="Ask a question about the repository using Gemini + date-aware pgvector RAG",
+    summary="Ask a question about the repository using OpenRouter + date-aware pgvector RAG",
     description=(
         "Executes a date-aware grounded RAG query: automatically detects chronological boundaries "
         "(e.g., 'after August 1, 2026', 'August 2026', 'transition'), performs exact Supabase event "
         "timestamp filtering or pgvector semantic search, orders evidence chronologically when needed, "
-        "and prompts Gemini to answer strictly based on repository facts, citing verifiable sources."
+        "and prompts OpenRouter to answer strictly based on repository facts, citing verifiable sources."
     ),
 )
 def ask_question(request: AskRequest) -> AskResponse:
@@ -86,6 +87,16 @@ def ask_question(request: AskRequest) -> AskResponse:
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
         raise HTTPException(status_code=400, detail=str(e))
+    except OpenRouterConfigurationError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] OpenRouterConfigurationError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        raise HTTPException(status_code=500, detail=str(e))
+    except OpenRouterAPIError as e:
+        sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] OpenRouterAPIError caught:\n" + "=" * 60 + "\n")
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        raise HTTPException(status_code=502, detail=f"OpenRouter AI Service Error: {str(e)}")
     except GeminiConfigurationError as e:
         sys.stderr.write("\n" + "=" * 60 + "\n[/ai/ask ERROR] GeminiConfigurationError caught:\n" + "=" * 60 + "\n")
         traceback.print_exc(file=sys.stderr)
