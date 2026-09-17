@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env if present
 load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(os.path.join(os.getcwd(), "backend", ".env"))
 
 
 class SupabaseConfigurationError(Exception):

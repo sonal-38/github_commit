@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(os.path.join(os.getcwd(), "backend", ".env"))
 
 
 class Neo4jConfigurationError(Exception):
