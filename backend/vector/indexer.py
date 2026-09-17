@@ -31,11 +31,12 @@ class VectorIndexer:
         self.supabase = supabase_client or SupabaseClient()
         self.embeddings = embedding_service or EmbeddingService()
 
-    def index_repository(self, owner: str, repo: str) -> Dict[str, Any]:
+    def index_repository(self, owner: str, repo: str, incremental: bool = True) -> Dict[str, Any]:
         """
         Loads all relational records for the repository from Supabase,
         converts them to semantic documents, embeds them, and upserts to Supabase pgvector.
         Idempotent: Re-running this replaces/updates existing records on primary key conflict.
+        Incremental: When True, checks existing document IDs and only generates embeddings for new records.
         """
         if hasattr(self.supabase, "verify_connectivity"):
             self.supabase.verify_connectivity()
@@ -77,6 +78,13 @@ class VectorIndexer:
         prs = self.supabase.select("pull_requests", {"repository_id": f"eq.{repo_id}"})
         issues = self.supabase.select("issues", {"repository_id": f"eq.{repo_id}"})
 
+        # Fetch commit files
+        commit_files = self.supabase.select("commit_files", {"repository": f"eq.{resolved_full_name}"})
+        if not commit_files and resolved_full_name != full_name:
+            commit_files = self.supabase.select("commit_files", {"repository": f"eq.{full_name}"})
+        if not commit_files:
+            commit_files = self.supabase.select("commit_files", {"repository": f"eq.{resolved_repo_name}"})
+
         # Fetch developers map
         developers_list = self.supabase.select("developers")
         dev_map: Dict[int, Dict[str, Any]] = {d["id"]: d for d in developers_list if "id" in d}
@@ -108,10 +116,18 @@ class VectorIndexer:
                 ics = self.supabase.select("issue_comments", {"issue_id": f"eq.{iid}"})
                 issue_comments.extend(ics)
 
+        # Map commit files by commit SHA for commit doc summarization
+        commit_files_by_sha: Dict[str, List[Dict[str, Any]]] = {}
+        for cf in commit_files:
+            sha = cf.get("commit_sha")
+            if sha:
+                commit_files_by_sha.setdefault(sha, []).append(cf)
+
         # 3. Build documents across categories
         documents: List[DocumentItem] = []
         stats = {
             "commits": 0,
+            "commit_files": 0,
             "pull_requests": 0,
             "reviews": 0,
             "review_comments": 0,
@@ -120,12 +136,28 @@ class VectorIndexer:
             "changed_files": 0,
         }
 
-        # Build commit documents
+        # Build commit documents (including changed files summary if available)
         for c in commits:
-            doc = DocumentBuilder.build_commit_doc(c, resolved_full_name, dev_map)
+            c_sha = c.get("sha", "")
+            c_files = commit_files_by_sha.get(c_sha, [])
+            doc = DocumentBuilder.build_commit_doc(c, resolved_full_name, dev_map, commit_files=c_files)
             if doc and doc.text.strip():
                 documents.append(doc)
                 stats["commits"] += 1
+
+        # Build commit file documents (one document per file modified by a specific commit)
+        commit_map: Dict[str, Dict[str, Any]] = {c["sha"]: c for c in commits if "sha" in c}
+        for cf in commit_files:
+            parent_commit = commit_map.get(cf.get("commit_sha"), {})
+            doc = DocumentBuilder.build_commit_file_doc(
+                cf=cf,
+                repo_name=resolved_full_name,
+                commit_info=parent_commit,
+                dev_map=dev_map,
+            )
+            if doc and doc.text.strip():
+                documents.append(doc)
+                stats["commit_files"] += 1
 
         # Map files and reviews to PRs for richer PR documents
         pr_files_map: Dict[int, List[Dict[str, Any]]] = {}
@@ -201,18 +233,48 @@ class VectorIndexer:
                 "repository": resolved_full_name,
                 "indexed": stats,
                 "total_vectors": 0,
+                "new_vectors": 0,
                 "message": "No indexable documents found for repository.",
             }
 
-        # 4. Generate embeddings in batches using BAAI/bge-base-en-v1.5
-        texts_to_embed = [doc.text for doc in documents]
+        # 4. Check existing vector IDs in document_embeddings for incremental indexing
+        existing_ids: set[str] = set()
+        if incremental:
+            try:
+                existing_rows = self.supabase.select(
+                    "document_embeddings",
+                    {"repository": f"eq.{resolved_full_name}", "select": "id"}
+                )
+                if not existing_rows and resolved_full_name != full_name:
+                    existing_rows = self.supabase.select(
+                        "document_embeddings",
+                        {"repository": f"eq.{full_name}", "select": "id"}
+                    )
+                existing_ids = {row["id"] for row in existing_rows if row.get("id")}
+            except Exception as e:
+                logger.warning("Could not fetch existing document IDs for incremental indexing: %s", e)
+
+        # Filter to only documents that do not already have an embedding
+        docs_to_embed = [d for d in documents if d.stable_key not in existing_ids] if incremental else documents
+
+        if not docs_to_embed:
+            return {
+                "repository": resolved_full_name,
+                "indexed": stats,
+                "total_vectors": len(existing_ids) or len(documents),
+                "new_vectors": 0,
+                "message": "All documents are up to date in vector store. 0 new embeddings generated.",
+            }
+
+        # 5. Generate embeddings in batches using BAAI/bge-base-en-v1.5 ONLY for new documents
+        texts_to_embed = [doc.text for doc in docs_to_embed]
         vectors = self.embeddings.embed_documents(texts_to_embed, batch_size=32)
 
-        # 5. Prepare records for Supabase pgvector table (document_embeddings)
+        # 6. Prepare records for Supabase pgvector table (document_embeddings)
         # Uses deterministic stable_key as the primary key 'id' to guarantee idempotency.
         now_iso = datetime.now(timezone.utc).isoformat()
         records = []
-        for doc, vec in zip(documents, vectors):
+        for doc, vec in zip(docs_to_embed, vectors):
             doc_meta = dict(doc.metadata or {})
             doc_meta["embedding_model"] = "BAAI/bge-base-en-v1.5"
             records.append({
@@ -227,7 +289,7 @@ class VectorIndexer:
                 "updated_at": now_iso,
             })
 
-        # 6. Upsert in batches into Supabase PostgreSQL (pgvector)
+        # 7. Upsert in batches into Supabase PostgreSQL (pgvector)
         # on_conflict="id" ensures duplicate prevention: updates existing rows if re-indexed.
         chunk_size = 50
         for i in range(0, len(records), chunk_size):
@@ -238,12 +300,13 @@ class VectorIndexer:
                 on_conflict="id",
             )
 
-        total_vectors = len(records)
+        total_vectors = len(existing_ids) + len(records)
 
         return {
             "repository": resolved_full_name,
             "indexed": stats,
             "total_vectors": total_vectors,
+            "new_vectors": len(records),
         }
 
     def search(

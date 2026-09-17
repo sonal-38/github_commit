@@ -2,7 +2,8 @@
 Document builder for converting structured Supabase records into semantic text documents.
 
 Produces human-readable, domain-rich context documents for:
-- Commits (message, developer, repo, date)
+- Commits (message, developer, repo, date, changed files summary)
+- Commit Files (file changed per commit, message, developer, date, stats, diff patch)
 - Pull Requests (title, body, author, reviews, changed files summary)
 - Reviews (body, state, reviewer, PR)
 - Review Comments (diff hunk, file path, comment text, line)
@@ -70,6 +71,7 @@ class DocumentBuilder:
         commit: Dict[str, Any],
         repo_name: str,
         dev_map: Dict[int, Dict[str, Any]],
+        commit_files: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[DocumentItem]:
         """Builds a semantic document from a Git commit record."""
         sha = commit.get("sha", "")
@@ -92,6 +94,18 @@ class DocumentBuilder:
             f"SHA: {sha}",
             f"Message: {message if message else 'No commit message provided.'}",
         ]
+
+        # Summarize changed files for this commit if provided
+        if commit_files:
+            file_names = [f.get("filename", "") for f in commit_files if f.get("filename")]
+            if file_names:
+                text_parts.append("")
+                text_parts.append("Changed Files:")
+                for fn in file_names[:15]:
+                    text_parts.append(f"- {fn}")
+                if len(file_names) > 15:
+                    text_parts.append(f"... and {len(file_names) - 15} more files")
+
         text = "\n".join(p for p in text_parts if p is not None).strip()
 
         stable_key = f"commit:{repo_name}:{sha}"
@@ -454,3 +468,111 @@ class DocumentBuilder:
                 "deletions": deletions,
             },
         )
+
+    @classmethod
+    def build_commit_file_doc(
+        cls,
+        cf: Dict[str, Any],
+        repo_name: str,
+        commit_info: Optional[Dict[str, Any]] = None,
+        dev_map: Optional[Dict[int, Dict[str, Any]]] = None,
+    ) -> Optional[DocumentItem]:
+        """
+        Builds a semantic document for a single file modified by a specific Git commit.
+
+        Inherits parent commit context (message, developer, timestamp) while capturing
+        file-level changes, stats, and patch context.
+        """
+        filename = (cf.get("filename") or "").strip()
+        if not filename:
+            return None
+
+        commit_sha = (cf.get("commit_sha") or "").strip()
+        if not commit_sha and commit_info:
+            commit_sha = (commit_info.get("sha") or "").strip()
+        if not commit_sha:
+            return None
+
+        commit_info = commit_info or {}
+        dev_map = dev_map or {}
+
+        # Resolve developer context from commit or dev_map
+        dev_name = "Unknown"
+        dev_id = commit_info.get("developer_id")
+        if dev_id and dev_id in dev_map:
+            dev_obj = dev_map[dev_id]
+            dev_name = dev_obj.get("login") or dev_obj.get("name") or dev_name
+        elif commit_info.get("author_login"):
+            dev_name = commit_info.get("author_login")
+        elif cf.get("developer"):
+            dev_name = cf.get("developer")
+
+        # Resolve commit message & timestamp (preserves original GitHub committed_at)
+        commit_message = (commit_info.get("message") or "").strip()
+        committed_at = (commit_info.get("committed_at") or commit_info.get("date") or "").strip()
+
+        # File stats and patch
+        status = cf.get("status") or "modified"
+        additions = cf.get("additions", 0)
+        deletions = cf.get("deletions", 0)
+        changes = cf.get("changes", additions + deletions)
+        patch = (cf.get("patch") or "").strip()
+
+        # Truncate diff patch to avoid excessive vector noise (limit to 1500 chars)
+        if len(patch) > 1500:
+            patch = patch[:1500] + "\n... [diff truncated]"
+
+        text_parts = [
+            f"Repository: {repo_name}",
+            "",
+            "Commit:",
+            f"{commit_message if commit_message else 'No commit message provided.'}",
+            "",
+            "Developer:",
+            f"{dev_name}",
+            "",
+            "Changed file:",
+            f"{filename}",
+            "",
+            "File status:",
+            f"{status}",
+            "",
+            "Changes:",
+            f"+{additions} additions",
+            f"-{deletions} deletions",
+        ]
+        if patch:
+            text_parts.append("")
+            text_parts.append(f"Diff Patch Preview:\n{patch}")
+
+        text = "\n".join(text_parts).strip()
+        stable_key = f"commit_file:{repo_name}:{commit_sha}:{filename}"
+        point_id = cls._create_deterministic_id(stable_key)
+        source_id = f"{commit_sha}:{filename}"
+
+        return DocumentItem(
+            point_id=point_id,
+            stable_key=stable_key,
+            document_type="commit_file",
+            repository=repo_name,
+            developer=dev_name,
+            source_id=source_id,
+            text=text,
+            metadata={
+                "repository": repo_name,
+                "document_type": "commit_file",
+                "source_id": source_id,
+                "commit_sha": commit_sha,
+                "filename": filename,
+                "developer": dev_name,
+                "committed_at": committed_at,
+                "status": status,
+                "additions": additions,
+                "deletions": deletions,
+                "changes": changes,
+                "patch_available": bool(patch),
+                "blob_url": cf.get("blob_url", ""),
+                "raw_url": cf.get("raw_url", ""),
+            },
+        )
+

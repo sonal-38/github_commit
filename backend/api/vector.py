@@ -27,6 +27,7 @@ router = APIRouter(
 
 class IndexStats(BaseModel):
     commits: int = Field(0, description="Number of commit documents indexed")
+    commit_files: int = Field(0, description="Number of commit file documents indexed")
     pull_requests: int = Field(0, description="Number of pull request documents indexed")
     reviews: int = Field(0, description="Number of code review documents indexed")
     review_comments: int = Field(0, description="Number of review comment documents indexed")
@@ -39,6 +40,7 @@ class VectorIndexResponse(BaseModel):
     repository: str
     indexed: IndexStats
     total_vectors: int
+    new_vectors: Optional[int] = None
     message: Optional[str] = None
 
 
@@ -70,10 +72,14 @@ class SearchResponse(BaseModel):
 def index_repository_vectors(
     owner: str = Path(..., description="Repository owner login (e.g. sonal-38)"),
     repo: str = Path(..., description="Repository name (e.g. smart-payment-platform)"),
+    incremental: bool = Query(
+        True,
+        description="When True, only embed and upsert new documents not already indexed. Set to False for full re-index.",
+    ),
 ):
     try:
         indexer = VectorIndexer()
-        result = indexer.index_repository(owner=owner, repo=repo)
+        result = indexer.index_repository(owner=owner, repo=repo, incremental=incremental)
         return result
     except SupabaseConfigurationError as e:
         raise HTTPException(status_code=500, detail=str(e))
