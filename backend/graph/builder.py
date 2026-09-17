@@ -8,6 +8,7 @@ PullRequest, Review, ReviewComment, Issue, IssueComment, File) and their connect
 from typing import Any, Dict, List, Optional
 from database.supabase_client import get_supabase_client, SupabaseDatabaseError
 from database.neo4j_client import get_neo4j_client, Neo4jClient
+from github.client import GitHubClient, GitHubClientError
 
 
 class KnowledgeGraphBuilder:
@@ -16,9 +17,14 @@ class KnowledgeGraphBuilder:
     persisted in Supabase PostgreSQL.
     """
 
-    def __init__(self, neo4j_client: Optional[Neo4jClient] = None):
+    def __init__(
+        self,
+        neo4j_client: Optional[Neo4jClient] = None,
+        github_client: Optional[GitHubClient] = None,
+    ):
         self.supabase = get_supabase_client()
         self.neo4j = neo4j_client or get_neo4j_client()
+        self.github = github_client or GitHubClient()
 
     def init_schema(self):
         """
@@ -35,6 +41,7 @@ class KnowledgeGraphBuilder:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (i:Issue) REQUIRE i.id IS UNIQUE;",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (ic:IssueComment) REQUIRE ic.id IS UNIQUE;",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:File) REQUIRE f.id IS UNIQUE;",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (cf:CommitFile) REQUIRE cf.id IS UNIQUE;",
         ]
         for query in constraints:
             try:
@@ -80,6 +87,22 @@ class KnowledgeGraphBuilder:
         prs = self.supabase.select("pull_requests", {"repository_id": f"eq.{repo_id}"})
         issues = self.supabase.select("issues", {"repository_id": f"eq.{repo_id}"})
 
+        # Fetch commit files belonging to this repository
+        resolved_full_name = repo_record.get("full_name") or full_name
+        resolved_repo_name = repo_record.get("name") or repo_clean
+        commit_files = self.supabase.select("commit_files", {"repository": f"eq.{resolved_full_name}"})
+        if not commit_files and resolved_full_name != full_name:
+            commit_files = self.supabase.select("commit_files", {"repository": f"eq.{full_name}"})
+        if not commit_files:
+            commit_files = self.supabase.select("commit_files", {"repository": f"eq.{resolved_repo_name}"})
+
+        # Group commit files by commit_sha for fast association
+        commit_files_by_sha: Dict[str, List[Dict[str, Any]]] = {}
+        for cf in commit_files:
+            sha = cf.get("commit_sha")
+            if sha:
+                commit_files_by_sha.setdefault(sha, []).append(cf)
+
         # Fetch all developers from Supabase
         developers_list = self.supabase.select("developers")
         dev_map: Dict[int, Dict[str, Any]] = {d["id"]: d for d in developers_list if "id" in d}
@@ -122,6 +145,7 @@ class KnowledgeGraphBuilder:
             "issues": 0,
             "issue_comments": 0,
             "files": 0,
+            "commit_files": 0,
         }
         relationships_count = 0
 
@@ -180,14 +204,17 @@ class KnowledgeGraphBuilder:
                 })
                 nodes_created_or_updated["developers"] += 1
 
-        # --- C. MERGE Commits and Relationships ---
+        # --- C. MERGE Commits, CommitFiles, and Relationships ---
         # (Repository)-[:HAS_COMMIT]->(Commit)
         # (Commit)-[:AUTHORED_BY]->(Developer)
+        # (Commit)-[:CHANGED]->(CommitFile)
         commit_cypher = """
         MATCH (r:Repository {id: $repo_id})
         MERGE (c:Commit {id: $sha})
-        ON CREATE SET c.sha = $sha, c.message = $message, c.committed_at = $committed_at, c.html_url = $html_url
-        ON MATCH SET c.sha = $sha, c.message = $message, c.committed_at = $committed_at, c.html_url = $html_url
+        ON CREATE SET c.sha = $sha, c.repository = $repo_id, c.message = $message,
+                      c.committed_at = $committed_at, c.html_url = $html_url
+        ON MATCH SET c.sha = $sha, c.repository = $repo_id, c.message = $message,
+                     c.committed_at = $committed_at, c.html_url = $html_url
         MERGE (r)-[:HAS_COMMIT]->(c)
         """
         commit_dev_cypher = """
@@ -195,6 +222,31 @@ class KnowledgeGraphBuilder:
         MATCH (d:Developer {id: $dev_login})
         MERGE (c)-[:AUTHORED_BY]->(d)
         """
+        commit_file_cypher = """
+        MATCH (c:Commit {id: $sha})
+        MERGE (cf:CommitFile {id: $id})
+        ON CREATE SET cf.repository = $repository,
+                      cf.commit_sha = $commit_sha,
+                      cf.filename = $filename,
+                      cf.status = $status,
+                      cf.additions = $additions,
+                      cf.deletions = $deletions,
+                      cf.changes = $changes,
+                      cf.patch = $patch,
+                      cf.blob_url = $blob_url
+        ON MATCH SET cf.repository = $repository,
+                     cf.commit_sha = $commit_sha,
+                     cf.filename = $filename,
+                     cf.status = $status,
+                     cf.additions = $additions,
+                     cf.deletions = $deletions,
+                     cf.changes = $changes,
+                     cf.patch = $patch,
+                     cf.blob_url = $blob_url
+        MERGE (c)-[:CHANGED]->(cf)
+        """
+        seen_commit_file_ids = set()
+        seen_commit_shas = set()
         for c in commits:
             sha = c.get("sha")
             if not sha:
@@ -207,6 +259,7 @@ class KnowledgeGraphBuilder:
                 "html_url": c.get("html_url") or "",
             })
             nodes_created_or_updated["commits"] += 1
+            seen_commit_shas.add(sha)
             relationships_count += 1  # HAS_COMMIT
 
             dev = dev_map.get(c.get("developer_id"))
@@ -217,9 +270,35 @@ class KnowledgeGraphBuilder:
                 })
                 relationships_count += 1  # AUTHORED_BY
 
-        # --- D. MERGE Pull Requests and Relationships ---
+            # Process Commit Files changed by this specific commit
+            c_files = commit_files_by_sha.get(sha, [])
+            for cf in c_files:
+                filename = cf.get("filename")
+                if not filename:
+                    continue
+                stable_cf_id = f"{full_name}:{sha}:{filename}"
+                self.neo4j.execute_query(commit_file_cypher, {
+                    "sha": sha,
+                    "id": stable_cf_id,
+                    "repository": full_name,
+                    "commit_sha": sha,
+                    "filename": filename,
+                    "status": cf.get("status") or "modified",
+                    "additions": cf.get("additions") if cf.get("additions") is not None else 0,
+                    "deletions": cf.get("deletions") if cf.get("deletions") is not None else 0,
+                    "changes": cf.get("changes") if cf.get("changes") is not None else 0,
+                    "patch": cf.get("patch"),
+                    "blob_url": cf.get("blob_url"),
+                })
+                if stable_cf_id not in seen_commit_file_ids:
+                    nodes_created_or_updated["commit_files"] += 1
+                    seen_commit_file_ids.add(stable_cf_id)
+                relationships_count += 1  # CHANGED
+
+        # --- D. MERGE Pull Requests, PR Commits, and Relationships ---
         # (Repository)-[:HAS_PR]->(PullRequest)
         # (PullRequest)-[:CREATED_BY]->(Developer)
+        # (PullRequest)-[:CONTAINS]->(Commit)
         pr_cypher = """
         MATCH (r:Repository {id: $repo_id})
         MERGE (p:PullRequest {id: $pr_id})
@@ -233,6 +312,11 @@ class KnowledgeGraphBuilder:
         MATCH (p:PullRequest {id: $pr_id})
         MATCH (d:Developer {id: $dev_login})
         MERGE (p)-[:CREATED_BY]->(d)
+        """
+        pr_contains_commit_cypher = """
+        MATCH (p:PullRequest {id: $pr_id})
+        MATCH (c:Commit {id: $sha})
+        MERGE (p)-[:CONTAINS]->(c)
         """
         for p in prs:
             pr_num = p.get("github_pr_number")
@@ -259,6 +343,80 @@ class KnowledgeGraphBuilder:
                     "dev_login": dev["github_login"],
                 })
                 relationships_count += 1  # CREATED_BY
+
+            # Fetch real GitHub PR commits using GitHubClient
+            try:
+                pr_commits = self.github.get_pull_request_commits(
+                    owner=owner_clean, repo=repo_clean, pull_number=pr_num
+                )
+            except Exception:
+                pr_commits = []
+
+            for pr_c in pr_commits:
+                c_sha = pr_c.get("sha")
+                if not c_sha:
+                    continue
+
+                # Ensure Commit node exists and is connected to Repository
+                if c_sha not in seen_commit_shas:
+                    self.neo4j.execute_query(commit_cypher, {
+                        "repo_id": full_name,
+                        "sha": c_sha,
+                        "message": pr_c.get("message") or "",
+                        "committed_at": pr_c.get("date") or "",
+                        "html_url": pr_c.get("url") or "",
+                    })
+                    nodes_created_or_updated["commits"] += 1
+                    seen_commit_shas.add(c_sha)
+                    relationships_count += 1  # HAS_COMMIT
+
+                # Ensure commit author developer is linked if present
+                c_author_login = pr_c.get("author_login")
+                if c_author_login:
+                    self.neo4j.execute_query(dev_cypher, {
+                        "id": c_author_login,
+                        "login": c_author_login,
+                        "name": pr_c.get("author_name") or c_author_login,
+                        "email": pr_c.get("author_email") or "",
+                        "avatar_url": "",
+                    })
+                    self.neo4j.execute_query(commit_dev_cypher, {
+                        "sha": c_sha,
+                        "dev_login": c_author_login,
+                    })
+                    relationships_count += 1  # AUTHORED_BY
+
+                # Link PR -[:CONTAINS]-> Commit
+                self.neo4j.execute_query(pr_contains_commit_cypher, {
+                    "pr_id": stable_pr_id,
+                    "sha": c_sha,
+                })
+                relationships_count += 1  # CONTAINS
+
+                # Connect Commit -> CommitFile if files exist for this commit
+                c_files = commit_files_by_sha.get(c_sha, [])
+                for cf in c_files:
+                    filename = cf.get("filename")
+                    if not filename:
+                        continue
+                    stable_cf_id = f"{full_name}:{c_sha}:{filename}"
+                    self.neo4j.execute_query(commit_file_cypher, {
+                        "sha": c_sha,
+                        "id": stable_cf_id,
+                        "repository": full_name,
+                        "commit_sha": c_sha,
+                        "filename": filename,
+                        "status": cf.get("status") or "modified",
+                        "additions": cf.get("additions") if cf.get("additions") is not None else 0,
+                        "deletions": cf.get("deletions") if cf.get("deletions") is not None else 0,
+                        "changes": cf.get("changes") if cf.get("changes") is not None else 0,
+                        "patch": cf.get("patch"),
+                        "blob_url": cf.get("blob_url"),
+                    })
+                    if stable_cf_id not in seen_commit_file_ids:
+                        nodes_created_or_updated["commit_files"] += 1
+                        seen_commit_file_ids.add(stable_cf_id)
+                    relationships_count += 1  # CHANGED
 
         # --- E. MERGE Reviews and Relationships ---
         # (PullRequest)-[:HAS_REVIEW]->(Review)
@@ -546,6 +704,7 @@ class KnowledgeGraphBuilder:
         summary_query = """
         MATCH (r:Repository {id: $repo_id})
         OPTIONAL MATCH (r)-[:HAS_COMMIT]->(c:Commit)
+        OPTIONAL MATCH (c)-[:CHANGED]->(cf:CommitFile)
         OPTIONAL MATCH (r)-[:HAS_PR]->(p:PullRequest)
         OPTIONAL MATCH (p)-[:HAS_REVIEW]->(rv:Review)
         OPTIONAL MATCH (rv)-[:HAS_COMMENT]->(rc:ReviewComment)
@@ -553,6 +712,7 @@ class KnowledgeGraphBuilder:
         OPTIONAL MATCH (r)-[:HAS_ISSUE]->(i:Issue)
         OPTIONAL MATCH (i)-[:HAS_COMMENT]->(ic:IssueComment)
         RETURN count(DISTINCT c) as commits,
+               count(DISTINCT cf) as commit_files,
                count(DISTINCT p) as pull_requests,
                count(DISTINCT rv) as reviews,
                count(DISTINCT rc) as review_comments,
@@ -593,6 +753,7 @@ class KnowledgeGraphBuilder:
                 "issues": counts.get("issues", 0),
                 "issue_comments": counts.get("issue_comments", 0),
                 "files": counts.get("files", 0),
+                "commit_files": counts.get("commit_files", 0),
             },
             "relationships_count": total_rels,
         }

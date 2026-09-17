@@ -756,6 +756,92 @@ class GitHubClient:
 
         return all_files
 
+    def get_pull_request_commits(self, owner: str, repo: str, pull_number: int) -> List[Dict[str, Any]]:
+        """
+        Fetch all commits belonging to a specific pull request with pagination.
+        Endpoint: GET /repos/{owner}/{repo}/pulls/{pull_number}/commits
+        Processes pages of 100 commits until no more are returned.
+        """
+        owner, repo = self._clean_owner_repo(owner, repo)
+        headers = self._get_headers()
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pull_number}/commits"
+        all_commits: List[Dict[str, Any]] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            params = {
+                "per_page": per_page,
+                "page": page,
+            }
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=15,
+                )
+            except requests.exceptions.RequestException as e:
+                raise GitHubClientError(
+                    f"Failed to connect to GitHub API: {str(e)}",
+                    status_code=503,
+                )
+
+            if response.status_code == 404:
+                raise GitHubClientError(
+                    f"Pull request #{pull_number} or repository '{owner}/{repo}' not found",
+                    status_code=404,
+                )
+            elif response.status_code == 401:
+                raise GitHubClientError("GitHub token is invalid or expired", status_code=401)
+            elif response.status_code == 403:
+                raise GitHubClientError("GitHub API rate limit exceeded or access forbidden", status_code=403)
+            elif response.status_code != 200:
+                raise GitHubClientError(
+                    f"GitHub API returned error status {response.status_code}",
+                    status_code=response.status_code,
+                )
+
+            try:
+                commits_data = response.json()
+            except ValueError:
+                raise GitHubClientError(
+                    "Received invalid JSON response from GitHub API",
+                    status_code=502,
+                )
+
+            if not isinstance(commits_data, list) or len(commits_data) == 0:
+                break
+
+            for item in commits_data:
+                commit_info = item.get("commit") or {}
+                git_author = commit_info.get("author") or {}
+                git_committer = commit_info.get("committer") or {}
+                gh_author = item.get("author") or {}
+
+                author_name = git_author.get("name") or git_committer.get("name")
+                author_email = git_author.get("email") or git_committer.get("email")
+                author_login = gh_author.get("login")
+                date = git_author.get("date") or git_committer.get("date")
+
+                all_commits.append({
+                    "sha": item.get("sha", ""),
+                    "message": commit_info.get("message", ""),
+                    "author_name": author_name,
+                    "author_email": author_email,
+                    "author_login": author_login,
+                    "date": date,
+                    "url": item.get("html_url"),
+                })
+
+            if len(commits_data) < per_page:
+                break
+
+            page += 1
+
+        return all_commits
+
     def get_commit_details(self, owner: str, repo: str, sha: str) -> Dict[str, Any]:
         """
         Fetch details for a specific commit, including its changed files with pagination.

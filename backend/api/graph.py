@@ -36,6 +36,7 @@ class NodeCounts(BaseModel):
     issues: int = Field(..., description="Number of Issue nodes")
     issue_comments: int = Field(..., description="Number of IssueComment nodes")
     files: int = Field(..., description="Number of File nodes")
+    commit_files: int = Field(0, description="Number of CommitFile nodes")
 
 
 class GraphBuildResponse(BaseModel):
