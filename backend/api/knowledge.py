@@ -25,6 +25,12 @@ from database.supabase_client import (
     SupabaseConfigurationError,
     SupabaseDatabaseError,
 )
+from database.neo4j_client import (
+    Neo4jConfigurationError,
+    Neo4jConnectionError,
+    Neo4jExecutionError,
+)
+from graph.builder import KnowledgeGraphBuilder
 from vector.embeddings import EmbeddingError
 
 router = APIRouter(
@@ -98,6 +104,16 @@ class InterpretationResponse(BaseModel):
     total_documents: Optional[int] = Field(None, description="Total evidence documents analyzed")
 
 
+class KnowledgeAreaGraphResponse(BaseModel):
+    repository: str = Field(..., description="Repository full name (owner/repo)")
+    status: str = Field(..., description="Status of the knowledge area graph operation")
+    knowledge_areas: int = Field(..., description="Count of KnowledgeArea nodes in the repository")
+    evidence_relationships: int = Field(..., description="Count of EVIDENCED_BY relationships created or existing")
+    developers_reached_through_evidence: int = Field(
+        ..., description="Count of distinct developers associated through evidence traceability"
+    )
+
+
 @router.post(
     "/repositories/{owner}/{repo}/cluster",
     response_model=ClusterResponse,
@@ -116,6 +132,11 @@ def cluster_repository_knowledge(
     metric: str = Query("euclidean", description="Distance metric (e.g. 'euclidean')"),
     cluster_selection_method: str = Query("eom", description="'eom' or 'leaf'"),
 ):
+    print(
+        f"\n>>> [API REQUEST] POST /knowledge/repositories/{owner}/{repo}/cluster "
+        f"(min_cluster_size={min_cluster_size}, min_samples={min_samples}, metric='{metric}', method='{cluster_selection_method}')",
+        flush=True,
+    )
     try:
         result = run_knowledge_clustering(
             owner=owner,
@@ -150,6 +171,7 @@ def inspect_knowledge_documents(
     owner: str = Path(..., description="Repository owner"),
     repo: str = Path(..., description="Repository name"),
 ):
+    print(f"\n>>> [API REQUEST] GET /knowledge/repositories/{owner}/{repo}/documents", flush=True)
     try:
         docs = load_knowledge_documents(owner=owner, repo=repo)
         type_counts = {}
@@ -200,6 +222,11 @@ def interpret_repository_knowledge(
     metric: str = Query("euclidean", description="Distance metric (e.g. 'euclidean')"),
     cluster_selection_method: str = Query("eom", description="'eom' or 'leaf'"),
 ):
+    print(
+        f"\n>>> [API REQUEST] POST /knowledge/repositories/{owner}/{repo}/interpret "
+        f"(min_cluster_size={min_cluster_size}, min_samples={min_samples})",
+        flush=True,
+    )
     try:
         result = run_knowledge_interpretation(
             owner=owner,
@@ -223,4 +250,60 @@ def interpret_repository_knowledge(
             status_code=500,
             detail=f"Unexpected error during knowledge interpretation: {str(e)}",
         )
+
+
+@router.post(
+    "/repositories/{owner}/{repo}/graph",
+    response_model=KnowledgeAreaGraphResponse,
+    summary="Connect interpreted Knowledge Areas to the existing Neo4j graph",
+    description=(
+        "Consumes Step 11 interpreted Knowledge Areas and links them into the existing Neo4j "
+        "graph via (:KnowledgeArea)-[:EVIDENCED_BY]->(:Commit|:PullRequest|:CommitFile). "
+        "Preserves existing graph structure and provides multi-developer traceability without direct KNOWS edges."
+    ),
+)
+def connect_knowledge_areas_to_graph(
+    owner: str = Path(..., description="Repository owner (e.g. sonal-38)"),
+    repo: str = Path(..., description="Repository name (e.g. smart-payment-platform)"),
+    min_cluster_size: int = Query(5, ge=2, description="Minimum size of clusters for HDBSCAN"),
+    min_samples: int = Query(3, ge=1, description="HDBSCAN min_samples parameter"),
+    metric: str = Query("euclidean", description="Distance metric (e.g. 'euclidean')"),
+    cluster_selection_method: str = Query("eom", description="'eom' or 'leaf'"),
+):
+    print(
+        f"\n>>> [API REQUEST] POST /knowledge/repositories/{owner}/{repo}/graph "
+        f"(min_cluster_size={min_cluster_size}, min_samples={min_samples})",
+        flush=True,
+    )
+    try:
+        builder = KnowledgeGraphBuilder()
+        result = builder.build_knowledge_area_graph(
+            owner=owner,
+            repo=repo,
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric=metric,
+            cluster_selection_method=cluster_selection_method,
+        )
+        return result
+    except SupabaseConfigurationError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except SupabaseDatabaseError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Neo4jConfigurationError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Neo4jConnectionError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except Neo4jExecutionError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except EmbeddingError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error while attaching knowledge areas to graph: {str(e)}",
+        )
+
 

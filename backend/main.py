@@ -51,6 +51,7 @@ def read_root():
             "ai_ask": "/ai/ask",
             "knowledge_cluster": "/knowledge/repositories/{owner}/{repo}/cluster",
             "knowledge_documents": "/knowledge/repositories/{owner}/{repo}/documents",
-            "knowledge_interpret": "/knowledge/repositories/{owner}/{repo}/interpret"
+            "knowledge_interpret": "/knowledge/repositories/{owner}/{repo}/interpret",
+            "knowledge_graph": "/knowledge/repositories/{owner}/{repo}/graph"
         }
     }

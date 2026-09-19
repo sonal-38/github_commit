@@ -38,12 +38,14 @@ class EmbeddingService:
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
+                print(f"[Embeddings] Loading SentenceTransformer model '{self.model_name}'...", flush=True)
                 logger.info("Loading embedding model: %s", self.model_name)
                 self._model = SentenceTransformer(self.model_name)
                 if hasattr(self._model, "get_sentence_embedding_dimension"):
                     self._dimension = self._model.get_sentence_embedding_dimension()
                 elif hasattr(self._model, "get_embedding_dimension"):
                     self._dimension = self._model.get_embedding_dimension()
+                print(f"[Embeddings] Model '{self.model_name}' loaded successfully (dimension: {self._dimension}).", flush=True)
             except ImportError:
                 raise EmbeddingError(
                     "sentence-transformers is not installed. Please install it via "
@@ -97,11 +99,13 @@ class EmbeddingService:
         cleaned_texts = [t.strip() if t and t.strip() else "[empty]" for t in texts]
         model = self._get_model()
 
+        # Enable progress bar if batch has more than 5 documents or requested explicitly
+        show_bar = kwargs.get("show_progress_bar", len(texts) > 5)
         try:
             embeddings = model.encode(
                 cleaned_texts,
                 batch_size=batch_size,
-                show_progress_bar=False,
+                show_progress_bar=show_bar,
                 convert_to_numpy=True,
                 normalize_embeddings=True,
             )

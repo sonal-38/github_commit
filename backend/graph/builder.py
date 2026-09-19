@@ -5,6 +5,7 @@ Reads normalized GitHub data from Supabase PostgreSQL and constructs an
 idempotent knowledge graph representing entities (Repository, Developer, Commit,
 PullRequest, Review, ReviewComment, Issue, IssueComment, File) and their connections.
 """
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from database.supabase_client import get_supabase_client, SupabaseDatabaseError
 from database.neo4j_client import get_neo4j_client, Neo4jClient
@@ -42,6 +43,7 @@ class KnowledgeGraphBuilder:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (ic:IssueComment) REQUIRE ic.id IS UNIQUE;",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:File) REQUIRE f.id IS UNIQUE;",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (cf:CommitFile) REQUIRE cf.id IS UNIQUE;",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (ka:KnowledgeArea) REQUIRE ka.id IS UNIQUE;",
         ]
         for query in constraints:
             try:
@@ -756,4 +758,289 @@ class KnowledgeGraphBuilder:
                 "commit_files": counts.get("commit_files", 0),
             },
             "relationships_count": total_rels,
+        }
+
+    def build_knowledge_area_graph(
+        self,
+        owner: str,
+        repo: str,
+        interpretation_result: Optional[Dict[str, Any]] = None,
+        min_cluster_size: int = 5,
+        min_samples: int = 3,
+        metric: str = "euclidean",
+        cluster_selection_method: str = "eom",
+    ) -> Dict[str, Any]:
+        """
+        Step 12: Connect Knowledge Areas to the existing Neo4j graph.
+
+        Extends the existing Neo4j graph with:
+          (:KnowledgeArea {id, name, cluster_id, repository, document_count, candidate_label, ...})
+          (:KnowledgeArea)-[:EVIDENCED_BY]->(:Commit)
+          (:KnowledgeArea)-[:EVIDENCED_BY]->(:PullRequest)
+          (:KnowledgeArea)-[:EVIDENCED_BY]->(:CommitFile)
+
+        Preserves:
+          - Existing Step 9 entities (Repository, Developer, Commit, PullRequest, etc.)
+          - Multi-developer traceability through evidence:
+            (KnowledgeArea -> EVIDENCED_BY -> Commit/PR -> AUTHORED_BY/CREATED_BY -> Developer)
+          - Idempotency via MERGE
+        """
+        self.neo4j.verify_connectivity()
+        self.init_schema()
+
+        owner_clean = owner.strip()
+        repo_clean = repo.strip()
+        full_name = f"{owner_clean}/{repo_clean}"
+
+        # 1. Check repository existence in Neo4j or Supabase
+        check_repo = self.neo4j.execute_query(
+            """
+            MATCH (r:Repository)
+            WHERE r.id = $repo_id
+               OR toLower(r.id) = toLower($repo_id)
+               OR replace(toLower(r.id), '_', '-') = replace(toLower($repo_id), '_', '-')
+               OR replace(toLower(r.name), '_', '-') = replace(toLower($repo_name), '_', '-')
+            RETURN r.id as id, r.name as name, r.full_name as full_name
+            LIMIT 1
+            """,
+            {"repo_id": full_name, "repo_name": repo_clean}
+        )
+        if check_repo:
+            matched_repo_id = check_repo[0].get("id") or full_name
+        else:
+            # Fallback check Supabase
+            repos = self.supabase.select("repositories", {"full_name": f"eq.{full_name}"})
+            if not repos:
+                repos = self.supabase.select(
+                    "repositories",
+                    {"name": f"eq.{repo_clean}", "owner_login": f"eq.{owner_clean}"}
+                )
+            if not repos:
+                raise SupabaseDatabaseError(
+                    f"Repository '{full_name}' was not found in Supabase or Neo4j.",
+                    status_code=404
+                )
+            matched_repo_id = full_name
+
+        # 2. Obtain Step 11 Knowledge Area interpretation results
+        if interpretation_result is None:
+            from knowledge.interpretation import run_knowledge_interpretation
+            interpretation_result = run_knowledge_interpretation(
+                owner=owner_clean,
+                repo=repo_clean,
+                min_cluster_size=min_cluster_size,
+                min_samples=min_samples,
+                metric=metric,
+                cluster_selection_method=cluster_selection_method,
+                supabase_client=self.supabase,
+            )
+
+        status = interpretation_result.get("status", "completed")
+        clusters = interpretation_result.get("clusters", [])
+
+        if not clusters or status in ["no_data", "insufficient_data"]:
+            return {
+                "repository": full_name,
+                "status": status,
+                "knowledge_areas": 0,
+                "evidence_relationships": 0,
+                "developers_reached_through_evidence": 0,
+            }
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Cypher for KnowledgeArea node
+        ka_cypher = """
+        MERGE (ka:KnowledgeArea {id: $id})
+        ON CREATE SET ka.name = $name,
+                      ka.cluster_id = $cluster_id,
+                      ka.repository = $repository,
+                      ka.document_count = $document_count,
+                      ka.candidate_label = $candidate_label,
+                      ka.representative_terms = $representative_terms,
+                      ka.important_files = $important_files,
+                      ka.created_at = $created_at,
+                      ka.updated_at = $updated_at
+        ON MATCH SET ka.name = $name,
+                     ka.cluster_id = $cluster_id,
+                     ka.repository = $repository,
+                     ka.document_count = $document_count,
+                     ka.candidate_label = $candidate_label,
+                     ka.representative_terms = $representative_terms,
+                     ka.important_files = $important_files,
+                     ka.updated_at = $updated_at
+        """
+
+        repo_link_cypher = """
+        MATCH (r:Repository)
+        WHERE r.id = $repo_id
+           OR toLower(r.id) = toLower($repo_id)
+           OR replace(toLower(r.id), '_', '-') = replace(toLower($repo_id), '_', '-')
+        MATCH (ka:KnowledgeArea {id: $ka_id})
+        MERGE (r)-[:HAS_KNOWLEDGE_AREA]->(ka)
+        """
+
+        commit_evidence_cypher = """
+        MATCH (ka:KnowledgeArea {id: $ka_id})
+        MATCH (c:Commit)
+        WHERE c.id = $sha OR c.sha = $sha
+        MERGE (ka)-[:EVIDENCED_BY]->(c)
+        RETURN count(c) as cnt
+        """
+
+        pr_evidence_cypher = """
+        MATCH (ka:KnowledgeArea {id: $ka_id})
+        MATCH (p:PullRequest)
+        WHERE p.id = $pr_id
+           OR (p.number = $pr_number AND (p.repository = $repo_id OR p.id STARTS WITH $full_name OR p.id CONTAINS ('#' + toString($pr_number))))
+        MERGE (ka)-[:EVIDENCED_BY]->(p)
+        RETURN count(p) as cnt
+        """
+
+        commit_file_evidence_cypher = """
+        MATCH (ka:KnowledgeArea {id: $ka_id})
+        MATCH (cf:CommitFile)
+        WHERE cf.id = $cf_id
+           OR (cf.commit_sha = $sha AND cf.filename = $filename)
+        MERGE (ka)-[:EVIDENCED_BY]->(cf)
+        RETURN count(cf) as cnt
+        """
+
+        # 3. Create/update KnowledgeArea nodes and EVIDENCED_BY relationships
+        for cl in clusters:
+            cluster_id = cl.get("cluster_id")
+            if cluster_id is None or cluster_id < 0:
+                continue
+
+            candidate_label = cl.get("candidate_label") or f"Knowledge Area #{cluster_id}"
+            ka_stable_id = f"knowledge_area:{full_name}:{cluster_id}"
+            doc_count = cl.get("document_count", 0)
+            rep_terms = cl.get("representative_terms", [])
+            imp_files = cl.get("important_files", [])
+
+            self.neo4j.execute_query(ka_cypher, {
+                "id": ka_stable_id,
+                "name": candidate_label,
+                "cluster_id": cluster_id,
+                "repository": full_name,
+                "document_count": doc_count,
+                "candidate_label": candidate_label,
+                "representative_terms": rep_terms,
+                "important_files": imp_files,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            })
+
+            # Link Repository to KnowledgeArea
+            self.neo4j.execute_query(repo_link_cypher, {
+                "repo_id": matched_repo_id,
+                "ka_id": ka_stable_id,
+            })
+
+            # 4. Connect to evidence based on documents in the cluster
+            all_doc_ids = cl.get("all_document_ids", [])
+            for doc_id in all_doc_ids:
+                if not doc_id:
+                    continue
+
+                if doc_id.startswith("commit:"):
+                    # Format: commit:<repo>:<sha> or commit:<sha>
+                    parts = doc_id.split(":")
+                    sha = parts[-1].strip()
+                    if sha:
+                        self.neo4j.execute_query(commit_evidence_cypher, {
+                            "ka_id": ka_stable_id,
+                            "sha": sha,
+                        })
+
+                elif doc_id.startswith("pr:"):
+                    # Format: pr:<repo>:<pr_number> or pr:<pr_number>
+                    parts = doc_id.split(":")
+                    pr_num_str = parts[-1].strip()
+                    try:
+                        pr_num = int(pr_num_str)
+                        stable_pr_id = f"{full_name}#{pr_num}"
+                        self.neo4j.execute_query(pr_evidence_cypher, {
+                            "ka_id": ka_stable_id,
+                            "pr_id": stable_pr_id,
+                            "pr_number": pr_num,
+                            "repo_id": matched_repo_id,
+                            "full_name": full_name,
+                        })
+                    except ValueError:
+                        pass
+
+                elif doc_id.startswith("commit_file:"):
+                    # Format: commit_file:<repo>:<commit_sha>:<filename>
+                    rest = doc_id[len("commit_file:"):]
+                    if rest.startswith(f"{full_name}:"):
+                        sub = rest[len(f"{full_name}:"):]
+                    elif rest.startswith(f"{repo_clean}:"):
+                        sub = rest[len(f"{repo_clean}:"):]
+                    else:
+                        parts = rest.split(":", 2)
+                        sub = f"{parts[1]}:{parts[2]}" if len(parts) >= 3 else rest
+
+                    if ":" in sub:
+                        sha, filename = sub.split(":", 1)
+                        stable_cf_id = f"{full_name}:{sha}:{filename}"
+                        self.neo4j.execute_query(commit_file_evidence_cypher, {
+                            "ka_id": ka_stable_id,
+                            "cf_id": stable_cf_id,
+                            "sha": sha,
+                            "filename": filename,
+                        })
+
+        # 5. Calculate summary metrics from Neo4j
+        # Knowledge areas count
+        ka_count_res = self.neo4j.execute_query(
+            """
+            MATCH (ka:KnowledgeArea)
+            WHERE ka.repository = $full_name
+               OR ka.repository = $repo_name
+               OR ka.id STARTS WITH ('knowledge_area:' + $full_name)
+            RETURN count(DISTINCT ka) as count
+            """,
+            {"full_name": full_name, "repo_name": repo_clean}
+        )
+        ka_count = ka_count_res[0].get("count", 0) if ka_count_res else 0
+
+        # Evidence relationships count
+        rel_count_res = self.neo4j.execute_query(
+            """
+            MATCH (ka:KnowledgeArea)-[rel:EVIDENCED_BY]->()
+            WHERE ka.repository = $full_name
+               OR ka.repository = $repo_name
+               OR ka.id STARTS WITH ('knowledge_area:' + $full_name)
+            RETURN count(rel) as count
+            """,
+            {"full_name": full_name, "repo_name": repo_clean}
+        )
+        rel_count = rel_count_res[0].get("count", 0) if rel_count_res else 0
+
+        # Developers reached through evidence
+        dev_count_res = self.neo4j.execute_query(
+            """
+            MATCH (ka:KnowledgeArea)
+            WHERE ka.repository = $full_name
+               OR ka.repository = $repo_name
+               OR ka.id STARTS WITH ('knowledge_area:' + $full_name)
+            MATCH (ka)-[:EVIDENCED_BY]->(e)
+            OPTIONAL MATCH (e)-[:AUTHORED_BY|CREATED_BY]->(d1:Developer)
+            OPTIONAL MATCH (e)-[:CONTAINS]->(:Commit)-[:AUTHORED_BY]->(d2:Developer)
+            WITH collect(DISTINCT d1.id) + collect(DISTINCT d2.id) as all_devs
+            UNWIND all_devs as d_id
+            WITH d_id WHERE d_id IS NOT NULL AND d_id <> ""
+            RETURN count(DISTINCT d_id) as count
+            """,
+            {"full_name": full_name, "repo_name": repo_clean}
+        )
+        dev_count = dev_count_res[0].get("count", 0) if dev_count_res else 0
+
+        return {
+            "repository": full_name,
+            "status": "completed",
+            "knowledge_areas": ka_count,
+            "evidence_relationships": rel_count,
+            "developers_reached_through_evidence": dev_count,
         }

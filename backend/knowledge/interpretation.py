@@ -40,6 +40,7 @@ from knowledge.clustering import (
     build_embeddings,
     cluster_embeddings,
     run_knowledge_clustering,
+    _log_progress,
 )
 from database.supabase_client import SupabaseClient
 from vector.embeddings import EmbeddingService
@@ -849,10 +850,74 @@ def run_knowledge_interpretation(
         [p if p is not None else 0.0 for p in probs_list], dtype=float
     )
 
+    regular_count = len(set(labels) - {-1})
+    _log_progress(
+        f"[Knowledge Interpretation] Interpreting {regular_count} clusters into candidate knowledge areas..."
+    )
+
     # Step 11: Interpret clusters
-    return interpret_clusters(
+    interpreted = interpret_clusters(
         repository=full_name,
         documents=documents,
         labels=labels,
         probabilities=probabilities,
     )
+    _log_progress(f"[Knowledge Interpretation] Interpretation complete for '{full_name}'.\n")
+    return interpreted
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+    import sys
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    import os
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+    parser = argparse.ArgumentParser(
+        description="AI Digital Shadow - Run Knowledge Area Interpretation CLI"
+    )
+    parser.add_argument("owner", help="Repository owner (e.g. sonal-38)")
+    parser.add_argument("repo", help="Repository name (e.g. smart_payment_platform)")
+    parser.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=5,
+        help="HDBSCAN min_cluster_size (default: 5)",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=3,
+        help="HDBSCAN min_samples (default: 3)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print raw JSON response output",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        res = run_knowledge_interpretation(
+            owner=args.owner,
+            repo=args.repo,
+            min_cluster_size=args.min_cluster_size,
+            min_samples=args.min_samples,
+        )
+        if args.json:
+            print("\n--- INTERPRETATION JSON RESULT ---")
+            print(json.dumps(res, indent=2))
+        else:
+            print("\n================ INTERPRETATION RESULTS ================")
+            for cl in res.get("clusters", []):
+                print(f"Cluster #{cl['cluster_id']}: '{cl['candidate_label']}' ({cl['document_count']} docs)")
+                print(f"  Representative Terms: {', '.join(cl.get('representative_terms', [])[:6])}")
+                print(f"  Important Files: {', '.join(cl.get('important_files', [])[:4])}")
+            print("========================================================\n")
+    except Exception as err:
+        print(f"\n[Knowledge Interpretation CLI Error] {err}", file=sys.stderr)
+        sys.exit(1)

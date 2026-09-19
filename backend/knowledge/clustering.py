@@ -23,6 +23,8 @@ and does NOT modify Supabase tables, Neo4j, or RAG.
 from dataclasses import dataclass, field
 import logging
 import re
+import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
@@ -30,6 +32,16 @@ from database.supabase_client import SupabaseClient, SupabaseDatabaseError, get_
 from vector.embeddings import EmbeddingService, EmbeddingError
 
 logger = logging.getLogger(__name__)
+
+
+def _log_progress(message: str) -> None:
+    """
+    Outputs immediate progress information to stdout and the application logger.
+    Ensures that command-line users, container logs, and API callers can observe
+    real-time execution stages without latency or silent buffering.
+    """
+    logger.info(message)
+    print(message, flush=True)
 
 
 class KnowledgeDocument:
@@ -417,6 +429,9 @@ def load_knowledge_documents(
     owner_clean = owner.strip()
     repo_clean = repo.strip()
     full_name = f"{owner_clean}/{repo_clean}"
+    t_start = time.time()
+
+    _log_progress(f"\n[Knowledge Clustering] [Step 1/4] Loading repository evidence for '{full_name}' from Supabase...")
 
     # 1. Look up repository record
     repos = sb.select("repositories", {"full_name": f"eq.{full_name}"})
@@ -443,6 +458,8 @@ def load_knowledge_documents(
     repo_id = repo_record.get("id")
     resolved_full_name = repo_record.get("full_name") or full_name
     resolved_repo_name = repo_record.get("name") or repo_clean
+
+    _log_progress(f"  * Identified repository: '{resolved_full_name}' (ID: {repo_id})")
 
     # 2. Extract records from Supabase tables
     commits = sb.select("commits", {"repository_id": f"eq.{repo_id}"})
@@ -589,6 +606,12 @@ def load_knowledge_documents(
         doc = format_pr_file_document(cf, pr_num, resolved_full_name, timestamp=pr_ts)
         add_doc(doc)
 
+    t_load = time.time() - t_start
+    _log_progress(
+        f"  * Extracted {len(documents)} deduplicated knowledge documents in {t_load:.2f}s "
+        f"({len(commits)} commits, {len(commit_files)} commit files, {len(prs)} PRs, {len(changed_files)} PR files)"
+    )
+
     return documents
 
 
@@ -605,6 +628,12 @@ def build_embeddings(
 
     service = embedding_service or EmbeddingService()
     texts = [doc.text for doc in documents]
+
+    t_start = time.time()
+    _log_progress(
+        f"\n[Knowledge Clustering] [Step 2/4] Generating {service.dimension}-dim BGE embeddings for "
+        f"{len(documents)} documents (batch_size=32)..."
+    )
 
     raw_vectors = service.embed_documents(texts, batch_size=32)
 
@@ -630,6 +659,11 @@ def build_embeddings(
     if np.isinf(embeddings).any():
         raise ValueError("Invalid embedding vectors: detected Infinite values")
 
+    t_elapsed = time.time() - t_start
+    _log_progress(
+        f"  * Generated {len(embeddings)} normalized embeddings ({expected_dim}-dim) in {t_elapsed:.2f}s"
+    )
+
     return embeddings
 
 
@@ -652,6 +686,15 @@ def cluster_embeddings(
             f"min_cluster_size={min_cluster_size}"
         )
 
+    t_start = time.time()
+    _log_progress(
+        f"\n[Knowledge Clustering] [Step 3/4] Running HDBSCAN density clustering on {len(embeddings)} vectors..."
+    )
+    _log_progress(
+        f"  * HDBSCAN config: min_cluster_size={min_cluster_size}, min_samples={min_samples}, "
+        f"metric='{metric}', method='{cluster_selection_method}'"
+    )
+
     try:
         from sklearn.cluster import HDBSCAN
     except ImportError:
@@ -666,6 +709,14 @@ def cluster_embeddings(
     clusterer.fit(embeddings)
     labels = clusterer.labels_
     probabilities = getattr(clusterer, "probabilities_", None)
+
+    regular_clusters = set(labels) - {-1}
+    noise_count = int(np.sum(labels == -1))
+    t_elapsed = time.time() - t_start
+    _log_progress(
+        f"  * HDBSCAN clustering completed in {t_elapsed:.2f}s: "
+        f"discovered {len(regular_clusters)} clusters, {noise_count} noise points ({noise_count / len(labels) * 100:.1f}%)"
+    )
 
     if return_probabilities:
         return labels, probabilities
@@ -789,6 +840,19 @@ def build_cluster_summary(
             item["contained_commit_ids"] = doc.contained_commit_ids
         doc_mappings.append(item)
 
+    _log_progress(f"\n[Knowledge Clustering] [Step 4/4] Aggregating cluster report for '{repository}'...")
+    _log_progress("================================================================================")
+    _log_progress(f"[Knowledge Clustering] CLUSTERING REPORT: '{repository}'")
+    _log_progress(f"  * Total documents analyzed : {len(documents)}")
+    _log_progress(f"  * Discovered clusters      : {len(regular_labels)}")
+    _log_progress(f"  * Noise (unassigned) docs  : {noise_count}")
+    for lbl in regular_labels[:10]:
+        c_items = clusters_map[lbl]
+        _log_progress(f"    - Cluster {lbl}: {len(c_items)} documents")
+    if len(regular_labels) > 10:
+        _log_progress(f"    - ... and {len(regular_labels) - 10} more clusters")
+    _log_progress("================================================================================")
+
     return {
         "status": "completed",
         "repository": repository,
@@ -819,6 +883,7 @@ def run_knowledge_clustering(
     Full pipeline execution for knowledge document construction and HDBSCAN clustering.
     Handles empty data and small datasets gracefully.
     """
+    total_start = time.time()
     owner_clean = owner.strip()
     repo_clean = repo.strip()
     full_name = f"{owner_clean}/{repo_clean}"
@@ -829,6 +894,14 @@ def run_knowledge_clustering(
         "metric": metric,
         "cluster_selection_method": cluster_selection_method,
     }
+
+    _log_progress("================================================================================")
+    _log_progress(f"[Knowledge Clustering] Starting pipeline for repository: '{full_name}'")
+    _log_progress(
+        f"  * Configuration: min_cluster_size={min_cluster_size}, min_samples={min_samples}, "
+        f"metric='{metric}', method='{cluster_selection_method}'"
+    )
+    _log_progress("================================================================================")
 
     # 1. Load knowledge documents from Supabase + GitHub PR commits
     documents = load_knowledge_documents(
@@ -841,6 +914,7 @@ def run_knowledge_clustering(
 
     # 2. Handle empty data
     if not documents:
+        _log_progress(f"[Knowledge Clustering] Pipeline finished: No documents found for repository '{full_name}'.")
         return {
             "status": "no_data",
             "repository": full_name,
@@ -856,6 +930,10 @@ def run_knowledge_clustering(
 
     # 3. Handle small datasets
     if len(documents) < min_cluster_size:
+        _log_progress(
+            f"[Knowledge Clustering] Notice: Found {len(documents)} documents, which is below "
+            f"min_cluster_size={min_cluster_size}. All documents assigned to noise (-1)."
+        )
         doc_mappings = [
             {
                 "id": d.id,
@@ -906,10 +984,79 @@ def run_knowledge_clustering(
         labels, probabilities = clustering_result, None
 
     # 6. Build and return summary report
-    return build_cluster_summary(
+    summary = build_cluster_summary(
         repository=full_name,
         documents=documents,
         labels=labels,
         probabilities=probabilities,
         parameters=params,
     )
+    total_elapsed = time.time() - total_start
+    _log_progress(f"\n[Knowledge Clustering] Pipeline successfully completed in {total_elapsed:.2f}s total.\n")
+    return summary
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    import os
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
+    parser = argparse.ArgumentParser(
+        description="AI Digital Shadow - Run Knowledge Document Clustering CLI"
+    )
+    parser.add_argument("owner", help="Repository owner (e.g. sonal-38)")
+    parser.add_argument("repo", help="Repository name (e.g. smart_payment_platform)")
+    parser.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=5,
+        help="HDBSCAN min_cluster_size (default: 5)",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=3,
+        help="HDBSCAN min_samples (default: 3)",
+    )
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="euclidean",
+        help="HDBSCAN metric (default: euclidean)",
+    )
+    parser.add_argument(
+        "--cluster-selection-method",
+        type=str,
+        default="eom",
+        choices=["eom", "leaf"],
+        help="Cluster selection method: 'eom' or 'leaf' (default: eom)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print raw JSON response output",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        res = run_knowledge_clustering(
+            owner=args.owner,
+            repo=args.repo,
+            min_cluster_size=args.min_cluster_size,
+            min_samples=args.min_samples,
+            metric=args.metric,
+            cluster_selection_method=args.cluster_selection_method,
+        )
+        if args.json:
+            print("\n--- CLUSTERING JSON RESULT ---")
+            print(json.dumps(res, indent=2))
+        else:
+            print("Tip: Pass --json to view the complete JSON output payload.")
+    except Exception as err:
+        print(f"\n[Knowledge Clustering CLI Error] {err}", file=sys.stderr)
+        sys.exit(1)
